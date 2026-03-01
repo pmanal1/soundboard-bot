@@ -35,7 +35,7 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     const voiceChannel = (member as any)?.voice?.channel;
 
     if (!voiceChannel) {
-      await sendReply(interaction, "You must be in a voice chanel!!!!!!!");
+      await sendReply(interaction, "You must be in a voice channel!");
       return;
     }
 
@@ -62,6 +62,24 @@ client.on("interactionCreate", async (interaction: Interaction) => {
   }
 
   if (interaction.commandName === "play") {
+    const member = interaction.member;
+    const voiceChannel = (member as any)?.voice?.channel;
+
+    if (!voiceChannel) {
+      await sendReply(interaction, "You must be in a voice channel!");
+      return;
+    }
+
+    if (voiceChannel) {
+      connection = joinVoiceChannel({
+        channelId: voiceChannel.id,
+        guildId: voiceChannel.guild.id,
+        adapterCreator: voiceChannel.guild.voiceAdapterCreator
+      });
+
+      connection.subscribe(player);
+    }
+
     const name = interaction.options.getString("name", true);
 
     const __filename = fileURLToPath(import.meta.url);
