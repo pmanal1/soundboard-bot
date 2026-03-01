@@ -52,7 +52,7 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     }
   }
 
-  if (interaction.commandName === "sound") {
+  if (interaction.commandName === "play") {
     const name = interaction.options.getString("name", true);
 
     const __filename = fileURLToPath(import.meta.url);
@@ -70,13 +70,30 @@ client.on("interactionCreate", async (interaction: Interaction) => {
 
     await interaction.reply(`Playing ${name} 🔊`);
   }
+
+  if (interaction.commandName === "pause") {
+    if (!interaction.inGuild()) {
+      await interaction.reply("This command can only be used in a server.");
+      return;
+    }
+
+    if (!connection) {
+      await interaction.reply("I'm not in a voice channel.");
+      return;
+    }
+
+    player.stop(true);
+
+    await interaction.reply("Stopped playback.");
+  }
 });
 
 const commands = [
   new SlashCommandBuilder().setName("join").setDescription("Join your voice channel"),
   new SlashCommandBuilder().setName("leave").setDescription("Leave the voice channel"),
-  new SlashCommandBuilder().setName("sound").setDescription("Play a sound").addStringOption(option =>
-    option.setName("name").setDescription("Name of the sound file").setRequired(true))
+  new SlashCommandBuilder().setName("play").setDescription("Play a sound").addStringOption(option =>
+    option.setName("name").setDescription("Name of the sound file").setRequired(true)),
+  new SlashCommandBuilder().setName("pause").setDescription("Pauses the currently playing sound"),
 ].map(command => command.toJSON());
 
 const rest = new REST({ version: "10"}).setToken(process.env.DISCORD_TOKEN!);

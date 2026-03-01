@@ -12,4 +12,5 @@ Currently set up in my homelab under an Ubuntu VM.
 ### project commands
 
 `npm run build` - builds the project into a js file, located in dist/
+
 `npm run exec` - starts the discord bot
