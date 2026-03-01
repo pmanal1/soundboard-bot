@@ -55,6 +55,7 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     if (connection) {
       connection.destroy();
       connection = null;
+      player.stop(true);
       await sendReply(interaction, "Left voice channel.");
     } else {
       await sendReply(interaction, "Not in a voice channel.");
