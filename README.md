@@ -1,0 +1,15 @@
+# soundboard-bot
+
+A discord bot to play sounds.
+
+Currently set up in my homelab under an Ubuntu VM.
+
+### Todo
+* Add more sound files! (ongoing)
+* Add a command to stop the discord bot from playing the sound
+* If the discord bot is not in a channel when the sound command is issued, join the user's channel and play the sound.
+
+### project commands
+
+`npm run build` - builds the project into a js file, located in dist/
+`npm run exec` - starts the discord bot
