@@ -10,7 +10,9 @@ Currently set up in my homelab under an Ubuntu VM.
 
 #### Completed 
 ✅ Add a command to stop the discord bot from playing the sound
+
 ✅ Change the replies to be user-facing only (to avoid spam)
+
 ✅ Add a command to list possible sounds
 
 ### project commands
