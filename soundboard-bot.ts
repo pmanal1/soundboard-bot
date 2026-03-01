@@ -6,6 +6,14 @@ import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
 
+async function sendReply(interaction: Interaction, message: string): Promise<void> {
+  if (!interaction.isChatInputCommand()) return;
+
+  const msg = await interaction.reply({ content: message, ephemeral: true });
+
+  setTimeout(() => msg.delete().catch(() => {}), 10000);
+}
+
 dotenv.config();
 
 const client = new Client({
@@ -27,7 +35,7 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     const voiceChannel = (member as any)?.voice?.channel;
 
     if (!voiceChannel) {
-      await interaction.reply("You must be in a voice channel!");
+      await sendReply(interaction, "You must be in a voice chanel!!!!!!!");
       return;
     }
 
@@ -39,16 +47,17 @@ client.on("interactionCreate", async (interaction: Interaction) => {
 
     connection.subscribe(player);
 
-    await interaction.reply("Joined voice channel 🔊");
+    await sendReply(interaction, "Joined voice channel 🔊");
   }
 
   if (interaction.commandName === "leave") {
+
     if (connection) {
       connection.destroy();
       connection = null;
-      await interaction.reply("Left voice channel.");
+      await sendReply(interaction, "Left voice channel.");
     } else {
-      await interaction.reply("Not in a voice channel.");
+      await sendReply(interaction, "Not in a voice channel.");
     }
   }
 
@@ -61,49 +70,49 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     const filePath = path.join(__dirname, "../sounds", `${name}.mp3`);
 
     if (!fs.existsSync(filePath)) {
-      await interaction.reply("Sound not found.");
+      await sendReply(interaction, "Sound not found.");
       return;
     }
 
     const resource = createAudioResource(filePath);
     player.play(resource);
 
-    await interaction.reply(`Playing ${name} 🔊`);
+    await sendReply(interaction, `Playing ${name} 🔊`);
   }
 
   if (interaction.commandName === "pause") {
     if (!interaction.inGuild()) {
-      await interaction.reply("This command can only be used in a server.");
+      await sendReply(interaction, "This command can only be used in a server.");
       return;
     }
 
     if (!connection) {
-      await interaction.reply("I'm not in a voice channel.");
+      await sendReply(interaction, "I'm not in a voice channel.");
       return;
     }
 
     player.stop(true);
 
-    await interaction.reply("Stopped playback.");
+    await sendReply(interaction, "Stopped playback.");
   }
 
   if (interaction.commandName === "list") {
     const soundsDir = path.resolve(process.cwd(), "sounds");
 
     if (!fs.existsSync(soundsDir)) {
-      await interaction.reply("Sounds folder not found.");
+      await sendReply(interaction, "Sounds folder not found.");
       return;
     }
 
     const files = fs.readdirSync(soundsDir).filter(file => file.endsWith(".mp3"));
     if (files.length === 0) {
-      await interaction.reply("No sounds available.");
+      await sendReply(interaction, "No sounds available.");
       return;
     }
 
     const names = files.map(file => file.replace(".mp3", ""));
 
-    await interaction.reply(`Available sounds:\n\n${names.map(n => `• ${n}`).join("\n")}`);
+    await sendReply(interaction, `Available sounds:\n\n${names.map(n => `• ${n}`).join("\n")}`);
   }
 });
 
