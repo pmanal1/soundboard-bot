@@ -6,8 +6,10 @@ Currently set up in my homelab under an Ubuntu VM.
 
 ### Todo
 * Add more sound files! (ongoing)
-* Add a command to stop the discord bot from playing the sound
+✅ Add a command to stop the discord bot from playing the sound
 * If the discord bot is not in a channel when the sound command is issued, join the user's channel and play the sound.
+* Change the replies to be user-facing only (to avoid spam)
+✅ Add a command to list possible sounds
 
 ### project commands
 

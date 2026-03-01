@@ -86,6 +86,25 @@ client.on("interactionCreate", async (interaction: Interaction) => {
 
     await interaction.reply("Stopped playback.");
   }
+
+  if (interaction.commandName === "list") {
+    const soundsDir = path.resolve(process.cwd(), "sounds");
+
+    if (!fs.existsSync(soundsDir)) {
+      await interaction.reply("Sounds folder not found.");
+      return;
+    }
+
+    const files = fs.readdirSync(soundsDir).filter(file => file.endsWith(".mp3"));
+    if (files.length === 0) {
+      await interaction.reply("No sounds available.");
+      return;
+    }
+
+    const names = files.map(file => file.replace(".mp3", ""));
+
+    await interaction.reply(`Available sounds:\n\n${names.map(n => `• ${n}`).join("\n")}`);
+  }
 });
 
 const commands = [
@@ -94,6 +113,7 @@ const commands = [
   new SlashCommandBuilder().setName("play").setDescription("Play a sound").addStringOption(option =>
     option.setName("name").setDescription("Name of the sound file").setRequired(true)),
   new SlashCommandBuilder().setName("pause").setDescription("Pauses the currently playing sound"),
+  new SlashCommandBuilder().setName("list").setDescription("Lists all possible soundtracks"),
 ].map(command => command.toJSON());
 
 const rest = new REST({ version: "10"}).setToken(process.env.DISCORD_TOKEN!);
