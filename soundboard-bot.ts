@@ -81,6 +81,22 @@ async function joinAndPlay(interaction: Interaction, name: string): Promise<void
   await sendReply(interaction, `Playing ${name} 🔊`);
 }
 
+async function stopPlayback(interaction: Interaction): Promise<void> {
+  if (!interaction.inGuild()) {
+    await sendReply(interaction, "This command can only be used in a server.");
+    return;
+  }
+
+  if (!connection) {
+    await sendReply(interaction, "I'm not in a voice channel.");
+     return;
+  }
+
+  player.stop(true);
+
+  await sendReply(interaction, "Stopped playback.");
+}
+
 client.once("clientReady", async () => {
   console.log(`Logged in as ${client.user?.tag}`);
 
@@ -100,13 +116,19 @@ client.on("interactionCreate", async (interaction: Interaction) => {
   if (interaction.isButton()) {
     const prefix = "sb:play:";
 
-    if (!interaction.customId.startsWith(prefix)) return;
+    if (interaction.customId.startsWith(prefix)) {
+      const name = interaction.customId.slice(prefix.length);
 
-    const name = interaction.customId.slice(prefix.length);
+      await joinAndPlay(interaction, name);
 
-    await joinAndPlay(interaction, name);
+      return;
+    }
 
-    return;
+    if (interaction.customId === "sb:stop") {
+      await stopPlayback(interaction);
+
+      return;
+    }
   }
 
   if (!interaction.isChatInputCommand()) return;
@@ -148,20 +170,8 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     await joinAndPlay(interaction, name);
   }
 
-  if (interaction.commandName === "pause") {
-    if (!interaction.inGuild()) {
-      await sendReply(interaction, "This command can only be used in a server.");
-      return;
-    }
-
-    if (!connection) {
-      await sendReply(interaction, "I'm not in a voice channel.");
-      return;
-    }
-
-    player.stop(true);
-
-    await sendReply(interaction, "Stopped playback.");
+  if (interaction.commandName === "stop") {
+    await stopPlayback(interaction);
   }
 
   if (interaction.commandName === "list") {
@@ -212,6 +222,15 @@ client.on("interactionCreate", async (interaction: Interaction) => {
       rows.push(row);
     }
 
+    const stopRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId("sb:stop")
+        .setLabel("Stop")
+        .setStyle(ButtonStyle.Danger)
+    );
+
+    rows.push(stopRow);
+
     await interaction.reply({
       content: "Choose a sound to play:",
       components: rows,
@@ -225,7 +244,7 @@ const commands = [
   new SlashCommandBuilder().setName("leave").setDescription("Leave the voice channel"),
   new SlashCommandBuilder().setName("play").setDescription("Play a sound").addStringOption(option =>
     option.setName("name").setDescription("Name of the sound file").setRequired(true)),
-  new SlashCommandBuilder().setName("pause").setDescription("Pauses the currently playing sound"),
+  new SlashCommandBuilder().setName("stop").setDescription("Stops the currently playing sound"),
   new SlashCommandBuilder().setName("list").setDescription("Lists all possible soundtracks"),
   new SlashCommandBuilder().setName("soundboard").setDescription("Open soundboard buttons"),
 ].map(command => command.toJSON());
