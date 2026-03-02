@@ -20,7 +20,7 @@ async function sendReply(interaction: Interaction, message: string): Promise<voi
 
   const msg = await interaction.reply({ content: message, ephemeral: true });
 
-  setTimeout(() => msg.delete().catch(() => {}), 10000);
+  setTimeout(() => msg.delete().catch(() => {}), 3000);
 }
 
 dotenv.config();
