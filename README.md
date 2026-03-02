@@ -6,6 +6,8 @@ Currently set up in my homelab under an Ubuntu VM.
 
 ### Todo
 * Add more sound files! (ongoing)
+* Autocomplete for /play?
+* Dropdown sound menu?
 
 #### Completed 
 * Add a command to stop the discord bot from playing the sound

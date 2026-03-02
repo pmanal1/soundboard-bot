@@ -1,4 +1,13 @@
-import { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes } from "discord.js";
+import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  Client,
+  GatewayIntentBits,
+  REST,
+  Routes,
+  SlashCommandBuilder
+} from "discord.js";
 import type { Interaction } from "discord.js";
 import { joinVoiceChannel, createAudioPlayer, createAudioResource, VoiceConnection } from "@discordjs/voice";
 import dotenv from "dotenv";
@@ -7,7 +16,7 @@ import fs from "fs";
 import { fileURLToPath } from "url";
 
 async function sendReply(interaction: Interaction, message: string): Promise<void> {
-  if (!interaction.isChatInputCommand()) return;
+  if (!interaction.isRepliable()) return;
 
   const msg = await interaction.reply({ content: message, ephemeral: true });
 
@@ -22,6 +31,55 @@ const client = new Client({
 
 let connection: VoiceConnection | null = null;
 const player = createAudioPlayer();
+
+function getSoundNames(): string[] | null {
+  const soundsDir = path.resolve(process.cwd(), "sounds");
+
+  if (!fs.existsSync(soundsDir)) {
+    return null;
+  }
+
+  const files = fs.readdirSync(soundsDir).filter(file => file.endsWith(".mp3"));
+
+  return files.map(file => file.replace(".mp3", ""));
+}
+
+async function joinAndPlay(interaction: Interaction, name: string): Promise<void> {
+  const member = (interaction as any).member;
+  const voiceChannel = member?.voice?.channel;
+
+  if (!voiceChannel) {
+    await sendReply(interaction, "You must be in a voice channel!");
+    return;
+  }
+
+  connection = joinVoiceChannel({
+    channelId: voiceChannel.id,
+    guildId: voiceChannel.guild.id,
+    adapterCreator: voiceChannel.guild.voiceAdapterCreator
+  });
+
+  connection.subscribe(player);
+
+  const soundsDir = path.resolve(process.cwd(), "sounds");
+
+  if (!fs.existsSync(soundsDir)) {
+    await sendReply(interaction, "Sounds folder not found.");
+    return;
+  }
+
+  const filePath = path.join(soundsDir, `${name}.mp3`);
+
+  if (!fs.existsSync(filePath)) {
+    await sendReply(interaction, "Sound not found.");
+    return;
+  }
+
+  const resource = createAudioResource(filePath);
+  player.play(resource);
+
+  await sendReply(interaction, `Playing ${name} 🔊`);
+}
 
 client.once("clientReady", async () => {
   console.log(`Logged in as ${client.user?.tag}`);
@@ -39,6 +97,18 @@ client.once("clientReady", async () => {
 });
 
 client.on("interactionCreate", async (interaction: Interaction) => {
+  if (interaction.isButton()) {
+    const prefix = "sb:play:";
+
+    if (!interaction.customId.startsWith(prefix)) return;
+
+    const name = interaction.customId.slice(prefix.length);
+
+    await joinAndPlay(interaction, name);
+
+    return;
+  }
+
   if (!interaction.isChatInputCommand()) return;
 
   if (interaction.commandName === "join") {
@@ -74,40 +144,8 @@ client.on("interactionCreate", async (interaction: Interaction) => {
   }
 
   if (interaction.commandName === "play") {
-    const member = interaction.member;
-    const voiceChannel = (member as any)?.voice?.channel;
-
-    if (!voiceChannel) {
-      await sendReply(interaction, "You must be in a voice channel!");
-      return;
-    }
-
-    if (voiceChannel) {
-      connection = joinVoiceChannel({
-        channelId: voiceChannel.id,
-        guildId: voiceChannel.guild.id,
-        adapterCreator: voiceChannel.guild.voiceAdapterCreator
-      });
-
-      connection.subscribe(player);
-    }
-
     const name = interaction.options.getString("name", true);
-
-    const __filename = fileURLToPath(import.meta.url);
-    const __dirname = path.dirname(__filename);
-
-    const filePath = path.join(__dirname, "../sounds", `${name}.mp3`);
-
-    if (!fs.existsSync(filePath)) {
-      await sendReply(interaction, "Sound not found.");
-      return;
-    }
-
-    const resource = createAudioResource(filePath);
-    player.play(resource);
-
-    await sendReply(interaction, `Playing ${name} 🔊`);
+    await joinAndPlay(interaction, name);
   }
 
   if (interaction.commandName === "pause") {
@@ -127,22 +165,58 @@ client.on("interactionCreate", async (interaction: Interaction) => {
   }
 
   if (interaction.commandName === "list") {
-    const soundsDir = path.resolve(process.cwd(), "sounds");
+    const names = getSoundNames();
 
-    if (!fs.existsSync(soundsDir)) {
+    if (names === null) {
       await sendReply(interaction, "Sounds folder not found.");
       return;
     }
 
-    const files = fs.readdirSync(soundsDir).filter(file => file.endsWith(".mp3"));
-    if (files.length === 0) {
+    if (names.length === 0) {
       await sendReply(interaction, "No sounds available.");
       return;
     }
 
-    const names = files.map(file => file.replace(".mp3", ""));
-
     await sendReply(interaction, `Available sounds:\n\n${names.map(n => `• ${n}`).join("\n")}`);
+  }
+
+  if (interaction.commandName === "soundboard") {
+    const names = getSoundNames();
+
+    if (names === null) {
+      await sendReply(interaction, "Sounds folder not found.");
+      return;
+    }
+
+    if (names.length === 0) {
+      await sendReply(interaction, "No sounds available.");
+      return;
+    }
+
+    const limitedNames = names.slice(0, 25);
+    const rows: ActionRowBuilder<ButtonBuilder>[] = [];
+
+    for (let i = 0; i < limitedNames.length; i += 5) {
+      const row = new ActionRowBuilder<ButtonBuilder>();
+      const slice = limitedNames.slice(i, i + 5);
+
+      for (const name of slice) {
+        row.addComponents(
+          new ButtonBuilder()
+            .setCustomId(`sb:play:${name}`)
+            .setLabel(name)
+            .setStyle(ButtonStyle.Secondary)
+        );
+      }
+
+      rows.push(row);
+    }
+
+    await interaction.reply({
+      content: "Choose a sound to play:",
+      components: rows,
+      ephemeral: true
+    });
   }
 });
 
@@ -153,6 +227,7 @@ const commands = [
     option.setName("name").setDescription("Name of the sound file").setRequired(true)),
   new SlashCommandBuilder().setName("pause").setDescription("Pauses the currently playing sound"),
   new SlashCommandBuilder().setName("list").setDescription("Lists all possible soundtracks"),
+  new SlashCommandBuilder().setName("soundboard").setDescription("Open soundboard buttons"),
 ].map(command => command.toJSON());
 
 const rest = new REST({ version: "10"}).setToken(process.env.DISCORD_TOKEN!);
