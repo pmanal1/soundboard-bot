@@ -32,6 +32,24 @@ const client = new Client({
 let connection: VoiceConnection | null = null;
 const player = createAudioPlayer();
 
+async function leaveVoice(interaction?: Interaction): Promise<void> {
+  if (!connection) {
+    if (interaction) {
+      await sendReply(interaction, "Not in a voice channel.");
+    }
+
+    return;
+  }
+
+  connection.destroy();
+  connection = null;
+  player.stop(true);
+
+  if (interaction) {
+    await sendReply(interaction, "Left voice channel.");
+  }
+}
+
 function getSoundNames(): string[] | null {
   const soundsDir = path.resolve(process.cwd(), "sounds");
 
@@ -129,6 +147,12 @@ client.on("interactionCreate", async (interaction: Interaction) => {
 
       return;
     }
+
+    if (interaction.customId === "sb:leave") {
+      await leaveVoice(interaction);
+
+      return;
+    }
   }
 
   if (!interaction.isChatInputCommand()) return;
@@ -154,15 +178,7 @@ client.on("interactionCreate", async (interaction: Interaction) => {
   }
 
   if (interaction.commandName === "leave") {
-
-    if (connection) {
-      connection.destroy();
-      connection = null;
-      player.stop(true);
-      await sendReply(interaction, "Left voice channel.");
-    } else {
-      await sendReply(interaction, "Not in a voice channel.");
-    }
+    await leaveVoice(interaction);
   }
 
   if (interaction.commandName === "play") {
@@ -226,6 +242,10 @@ client.on("interactionCreate", async (interaction: Interaction) => {
       new ButtonBuilder()
         .setCustomId("sb:stop")
         .setLabel("Stop")
+        .setStyle(ButtonStyle.Danger),
+      new ButtonBuilder()
+        .setCustomId("sb:leave")
+        .setLabel("Leave")
         .setStyle(ButtonStyle.Danger)
     );
 
@@ -236,6 +256,28 @@ client.on("interactionCreate", async (interaction: Interaction) => {
       components: rows,
       ephemeral: true
     });
+  }
+});
+
+client.on("voiceStateUpdate", async (oldState, newState) => {
+  const member = newState.member ?? oldState.member;
+
+  if (!member || member.user.bot) return;
+
+  const channel = oldState.channel ?? newState.channel;
+
+  if (!channel) return;
+
+  if (!connection) return;
+
+  const connectedChannelId = (connection.joinConfig as any).channelId;
+
+  if (channel.id !== connectedChannelId) return;
+
+  const nonBotMembers = channel.members.filter(m => !m.user.bot);
+
+  if (nonBotMembers.size === 0) {
+    await leaveVoice();
   }
 });
 
