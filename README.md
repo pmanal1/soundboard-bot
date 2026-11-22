@@ -18,8 +18,12 @@ Currently set up in my homelab under an Ubuntu VM.
 
 ### project commands
 
+`npm ci` - installs the exact dependency versions from package-lock.json (use this instead of `npm install` when setting up)
+
 `npm run build` - builds the project into a js file, located in dist/
 
 `npm run exec` - starts the discord bot and restarts it if it crashes (backoff from 1s up to 60s). It does not restart on a clean exit or a configuration error (missing env vars / invalid token).
 
 `npm run exec:once` - starts the discord bot without auto-restart
+
+`npm test` - builds the project and runs the tests in test/

@@ -11,20 +11,12 @@ import {
   SlashCommandBuilder
 } from "discord.js";
 import type { Interaction, VoiceBasedChannel } from "discord.js";
-import {
-  joinVoiceChannel,
-  createAudioPlayer,
-  createAudioResource,
-  entersState,
-  getVoiceConnection,
-  getVoiceConnections,
-  AudioPlayer,
-  VoiceConnection,
-  VoiceConnectionStatus
-} from "@discordjs/voice";
+import { createAudioResource, getVoiceConnection, getVoiceConnections } from "@discordjs/voice";
 import dotenv from "dotenv";
 import path from "path";
 import fs from "fs";
+import { describeLookupFailure, listSoundNames, resolveSound } from "./sounds.js";
+import { connectTo, describeConnectFailure, destroyConnection, getPlayer } from "./voice.js";
 
 dotenv.config();
 
@@ -71,7 +63,11 @@ async function sendReply(interaction: Interaction, message: string): Promise<voi
     : message;
 
   try {
-    if (interaction.replied || interaction.deferred) {
+    if (interaction.deferred && !interaction.replied) {
+      // Fill in the "thinking..." placeholder from deferEphemeral.
+      await interaction.editReply({ content });
+      setTimeout(() => interaction.deleteReply().catch(() => {}), 3000);
+    } else if (interaction.replied || interaction.deferred) {
       const msg = await interaction.followUp({ content, flags: MessageFlags.Ephemeral });
       setTimeout(() => msg.delete().catch(() => {}), 3000);
     } else {
@@ -84,93 +80,19 @@ async function sendReply(interaction: Interaction, message: string): Promise<voi
   }
 }
 
+async function deferEphemeral(interaction: Interaction): Promise<void> {
+  if (!interaction.isRepliable() || interaction.replied || interaction.deferred) return;
+
+  try {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  } catch (error) {
+    console.error("Failed to defer interaction:", error);
+  }
+}
+
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates]
 });
-
-// One audio player per guild, so servers don't hear (or stop) each other's sounds.
-const players = new Map<string, AudioPlayer>();
-const trackedConnections = new WeakSet<VoiceConnection>();
-
-function getPlayer(guildId: string): AudioPlayer {
-  let player = players.get(guildId);
-
-  if (!player) {
-    player = createAudioPlayer();
-
-    // Without an "error" listener, an AudioPlayer error (bad file, ffmpeg failure, ...) crashes the process.
-    player.on("error", error => {
-      console.error(`Audio player error in guild ${guildId}:`, error.message);
-    });
-
-    players.set(guildId, player);
-  }
-
-  return player;
-}
-
-function destroyConnection(conn: VoiceConnection): void {
-  // destroy() throws if the connection was already destroyed.
-  if (conn.state.status !== VoiceConnectionStatus.Destroyed) {
-    conn.destroy();
-  }
-}
-
-function trackConnection(conn: VoiceConnection, guildId: string): void {
-  // joinVoiceChannel returns the existing connection for a guild, so only attach listeners once.
-  if (trackedConnections.has(conn)) return;
-  trackedConnections.add(conn);
-
-  conn.on("error", error => {
-    console.error(`Voice connection error in guild ${guildId}:`, error);
-  });
-
-  conn.on(VoiceConnectionStatus.Disconnected, async () => {
-    try {
-      // If Discord is just moving us (e.g. channel switch), it will reconnect on its own.
-      await Promise.race([
-        entersState(conn, VoiceConnectionStatus.Signalling, 5_000),
-        entersState(conn, VoiceConnectionStatus.Connecting, 5_000)
-      ]);
-    } catch {
-      // Truly disconnected (kicked, channel deleted, ...). Clean up.
-      destroyConnection(conn);
-    }
-  });
-
-  conn.on(VoiceConnectionStatus.Destroyed, () => {
-    const player = players.get(guildId);
-
-    if (player) {
-      player.stop(true);
-      players.delete(guildId);
-    }
-  });
-}
-
-function connectTo(voiceChannel: VoiceBasedChannel): AudioPlayer {
-  const guildId = voiceChannel.guild.id;
-  const conn = joinVoiceChannel({
-    channelId: voiceChannel.id,
-    guildId,
-    adapterCreator: voiceChannel.guild.voiceAdapterCreator
-  });
-
-  trackConnection(conn, guildId);
-
-  const player = getPlayer(guildId);
-  conn.subscribe(player);
-
-  // Don't sit half-connected forever (e.g. network issues); give up and clean up instead.
-  entersState(conn, VoiceConnectionStatus.Ready, 20_000).catch(() => {
-    if (conn.state.status !== VoiceConnectionStatus.Destroyed) {
-      console.error(`Voice connection in guild ${guildId} did not become ready in time; disconnecting.`);
-      destroyConnection(conn);
-    }
-  });
-
-  return player;
-}
 
 async function leaveVoice(guildId: string, interaction?: Interaction): Promise<void> {
   const conn = getVoiceConnection(guildId);
@@ -192,19 +114,7 @@ async function leaveVoice(guildId: string, interaction?: Interaction): Promise<v
 }
 
 function getSoundNames(): string[] | null {
-  try {
-    if (!fs.existsSync(SOUNDS_DIR)) {
-      return null;
-    }
-
-    return fs.readdirSync(SOUNDS_DIR)
-      .filter(file => file.toLowerCase().endsWith(".mp3"))
-      .map(file => file.slice(0, -".mp3".length))
-      .filter(name => name.length > 0);
-  } catch (error) {
-    console.error("Failed to read sounds folder:", error);
-    return null;
-  }
+  return listSoundNames(SOUNDS_DIR);
 }
 
 /**
@@ -236,19 +146,15 @@ async function resolveVoiceChannel(interaction: Interaction): Promise<VoiceBased
 }
 
 async function joinAndPlay(interaction: Interaction, name: string): Promise<void> {
-  const names = getSoundNames();
+  // Validate the sound before touching voice, so a bad name never moves the bot to another channel.
+  const sound = await resolveSound(SOUNDS_DIR, name);
 
-  if (names === null) {
-    await sendReply(interaction, "Sounds folder not found.");
-    return;
-  }
+  if (!sound.ok) {
+    if (sound.reason === "outside-folder") {
+      console.warn(`Rejected sound "${name}": resolves outside the sounds folder.`);
+    }
 
-  // Only allow names that exist in the sounds folder. This also prevents
-  // path traversal (e.g. "../../something") via the /play name option.
-  const fileName = names.find(n => n === name);
-
-  if (fileName === undefined) {
-    await sendReply(interaction, "Sound not found.");
+    await sendReply(interaction, describeLookupFailure(sound.reason));
     return;
   }
 
@@ -256,18 +162,29 @@ async function joinAndPlay(interaction: Interaction, name: string): Promise<void
 
   if (!voiceChannel) return;
 
-  const player = connectTo(voiceChannel);
+  // Connecting can take a few seconds; acknowledge first so the interaction doesn't expire.
+  await deferEphemeral(interaction);
+
+  const connection = await connectTo(voiceChannel);
+
+  if (!connection.ok) {
+    await sendReply(interaction, describeConnectFailure(connection.reason));
+    return;
+  }
 
   try {
-    const resource = createAudioResource(path.join(SOUNDS_DIR, `${fileName}.mp3`));
-    player.play(resource);
+    // Stream the already-validated file ourselves rather than handing ffmpeg a path.
+    const stream = fs.createReadStream(sound.filePath);
+    stream.on("error", error => console.error(`Failed to read sound "${sound.name}":`, error.message));
+
+    connection.player.play(createAudioResource(stream));
   } catch (error) {
-    console.error(`Failed to play sound "${fileName}":`, error);
+    console.error(`Failed to play sound "${sound.name}":`, error);
     await sendReply(interaction, "Failed to play that sound.");
     return;
   }
 
-  await sendReply(interaction, `Playing ${fileName} 🔊`);
+  await sendReply(interaction, `Playing ${sound.name} 🔊`);
 }
 
 async function stopPlayback(interaction: Interaction): Promise<void> {
@@ -281,7 +198,7 @@ async function stopPlayback(interaction: Interaction): Promise<void> {
     return;
   }
 
-  players.get(interaction.guildId)?.stop(true);
+  getPlayer(interaction.guildId)?.stop(true);
 
   await sendReply(interaction, "Stopped playback.");
 }
@@ -318,9 +235,11 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
 
     if (!voiceChannel) return;
 
-    connectTo(voiceChannel);
+    await deferEphemeral(interaction);
 
-    await sendReply(interaction, "Joined voice channel 🔊");
+    const connection = await connectTo(voiceChannel);
+
+    await sendReply(interaction, connection.ok ? "Joined voice channel 🔊" : describeConnectFailure(connection.reason));
   }
 
   if (interaction.commandName === "leave") {
@@ -501,11 +420,8 @@ function shutdown(signal: NodeJS.Signals): void {
   console.log(`Received ${signal}, shutting down...`);
 
   for (const conn of getVoiceConnections().values()) {
-    try {
-      destroyConnection(conn);
-    } catch (error) {
-      console.error("Failed to destroy voice connection during shutdown:", error);
-    }
+    // destroyConnection never throws, even if a connection is already being torn down.
+    destroyConnection(conn);
   }
 
   client.destroy()
