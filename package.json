@@ -6,21 +6,21 @@
   "scripts": {
     "build": "npx tsc",
     "exec": "node supervisor.js",
-    "exec:once": "node dist/soundboard-bot.js"
+    "exec:once": "node dist/soundboard-bot.js",
+    "test": "npm run build && node --test test/"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
   "dependencies": {
-    "@discordjs/voice": "^0.19.0",
-    "@snazzah/davey": "^0.1.9",
-    "discord.js": "^14.25.1",
-    "dotenv": "^17.3.1"
+    "@discordjs/voice": "^0.19.2",
+    "@snazzah/davey": "^0.1.12",
+    "discord.js": "^14.28.1",
+    "dotenv": "^17.4.2"
   },
   "devDependencies": {
-    "@types/node": "^25.3.3",
-    "ts-node": "^10.9.2",
+    "@types/node": "^25.9.9",
     "typescript": "^5.9.3"
   }
 }
