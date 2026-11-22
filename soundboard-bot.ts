@@ -5,6 +5,7 @@ import {
   Client,
   GatewayIntentBits,
   MessageFlags,
+  PermissionFlagsBits,
   REST,
   Routes,
   SlashCommandBuilder
@@ -15,6 +16,9 @@ import {
   createAudioPlayer,
   createAudioResource,
   entersState,
+  getVoiceConnection,
+  getVoiceConnections,
+  AudioPlayer,
   VoiceConnection,
   VoiceConnectionStatus
 } from "@discordjs/voice";
@@ -37,11 +41,14 @@ const MAX_SOUNDBOARD_SOUNDS = (MAX_ACTION_ROWS - 1) * MAX_BUTTONS_PER_ROW;
 
 const SOUNDS_DIR = path.resolve(process.cwd(), "sounds");
 
+// Exit code for errors a restart can't fix (bad config / token). The supervisor won't restart on it.
+const EXIT_CONFIG_ERROR = 78;
+
 const { DISCORD_TOKEN, CLIENT_ID, GUILD_ID } = process.env;
 
 if (!DISCORD_TOKEN || !CLIENT_ID) {
   console.error("Missing required environment variables: DISCORD_TOKEN and CLIENT_ID must be set (see .env-example).");
-  process.exit(1);
+  process.exit(EXIT_CONFIG_ERROR);
 }
 
 // Last-resort safety nets so a stray error is logged instead of silently killing the bot.
@@ -51,7 +58,7 @@ process.on("unhandledRejection", reason => {
 
 process.on("uncaughtException", error => {
   // The process may be in an inconsistent state after an uncaught exception,
-  // so log it and exit; a process manager (systemd, pm2, ...) should restart the bot.
+  // so log it and exit; the supervisor (npm run exec) restarts the bot.
   console.error("Uncaught exception:", error);
   process.exit(1);
 });
@@ -81,22 +88,41 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates]
 });
 
-let connection: VoiceConnection | null = null;
+// One audio player per guild, so servers don't hear (or stop) each other's sounds.
+const players = new Map<string, AudioPlayer>();
 const trackedConnections = new WeakSet<VoiceConnection>();
-const player = createAudioPlayer();
 
-// Without an "error" listener, an AudioPlayer error (bad file, ffmpeg failure, ...) crashes the process.
-player.on("error", error => {
-  console.error("Audio player error:", error.message);
-});
+function getPlayer(guildId: string): AudioPlayer {
+  let player = players.get(guildId);
 
-function trackConnection(conn: VoiceConnection): void {
+  if (!player) {
+    player = createAudioPlayer();
+
+    // Without an "error" listener, an AudioPlayer error (bad file, ffmpeg failure, ...) crashes the process.
+    player.on("error", error => {
+      console.error(`Audio player error in guild ${guildId}:`, error.message);
+    });
+
+    players.set(guildId, player);
+  }
+
+  return player;
+}
+
+function destroyConnection(conn: VoiceConnection): void {
+  // destroy() throws if the connection was already destroyed.
+  if (conn.state.status !== VoiceConnectionStatus.Destroyed) {
+    conn.destroy();
+  }
+}
+
+function trackConnection(conn: VoiceConnection, guildId: string): void {
   // joinVoiceChannel returns the existing connection for a guild, so only attach listeners once.
   if (trackedConnections.has(conn)) return;
   trackedConnections.add(conn);
 
   conn.on("error", error => {
-    console.error("Voice connection error:", error);
+    console.error(`Voice connection error in guild ${guildId}:`, error);
   });
 
   conn.on(VoiceConnectionStatus.Disconnected, async () => {
@@ -108,36 +134,48 @@ function trackConnection(conn: VoiceConnection): void {
       ]);
     } catch {
       // Truly disconnected (kicked, channel deleted, ...). Clean up.
-      if (conn.state.status !== VoiceConnectionStatus.Destroyed) {
-        conn.destroy();
-      }
+      destroyConnection(conn);
     }
   });
 
   conn.on(VoiceConnectionStatus.Destroyed, () => {
-    if (connection === conn) {
-      connection = null;
+    const player = players.get(guildId);
+
+    if (player) {
       player.stop(true);
+      players.delete(guildId);
     }
   });
 }
 
-function connectTo(voiceChannel: VoiceBasedChannel): VoiceConnection {
+function connectTo(voiceChannel: VoiceBasedChannel): AudioPlayer {
+  const guildId = voiceChannel.guild.id;
   const conn = joinVoiceChannel({
     channelId: voiceChannel.id,
-    guildId: voiceChannel.guild.id,
+    guildId,
     adapterCreator: voiceChannel.guild.voiceAdapterCreator
   });
 
-  trackConnection(conn);
-  conn.subscribe(player);
-  connection = conn;
+  trackConnection(conn, guildId);
 
-  return conn;
+  const player = getPlayer(guildId);
+  conn.subscribe(player);
+
+  // Don't sit half-connected forever (e.g. network issues); give up and clean up instead.
+  entersState(conn, VoiceConnectionStatus.Ready, 20_000).catch(() => {
+    if (conn.state.status !== VoiceConnectionStatus.Destroyed) {
+      console.error(`Voice connection in guild ${guildId} did not become ready in time; disconnecting.`);
+      destroyConnection(conn);
+    }
+  });
+
+  return player;
 }
 
-async function leaveVoice(interaction?: Interaction): Promise<void> {
-  if (!connection) {
+async function leaveVoice(guildId: string, interaction?: Interaction): Promise<void> {
+  const conn = getVoiceConnection(guildId);
+
+  if (!conn) {
     if (interaction) {
       await sendReply(interaction, "Not in a voice channel.");
     }
@@ -145,14 +183,8 @@ async function leaveVoice(interaction?: Interaction): Promise<void> {
     return;
   }
 
-  const conn = connection;
-  connection = null;
-  player.stop(true);
-
-  // destroy() throws if the connection was already destroyed elsewhere.
-  if (conn.state.status !== VoiceConnectionStatus.Destroyed) {
-    conn.destroy();
-  }
+  // The Destroyed listener stops this guild's player.
+  destroyConnection(conn);
 
   if (interaction) {
     await sendReply(interaction, "Left voice channel.");
@@ -175,20 +207,35 @@ function getSoundNames(): string[] | null {
   }
 }
 
-function getMemberVoiceChannel(interaction: Interaction): VoiceBasedChannel | null {
-  if (!interaction.inCachedGuild()) return null;
-
-  return interaction.member.voice.channel;
-}
-
-async function joinAndPlay(interaction: Interaction, name: string): Promise<void> {
-  const voiceChannel = getMemberVoiceChannel(interaction);
+/**
+ * Returns the caller's voice channel if the bot can join and speak in it,
+ * otherwise replies with the reason and returns null.
+ */
+async function resolveVoiceChannel(interaction: Interaction): Promise<VoiceBasedChannel | null> {
+  const voiceChannel = interaction.inCachedGuild() ? interaction.member.voice.channel : null;
 
   if (!voiceChannel) {
     await sendReply(interaction, "You must be in a voice channel!");
-    return;
+    return null;
   }
 
+  // Without these permissions the connection never becomes ready and nothing plays.
+  if (!voiceChannel.joinable) {
+    await sendReply(interaction, "I don't have permission to join your voice channel (or it's full).");
+    return null;
+  }
+
+  const me = voiceChannel.guild.members.me;
+
+  if (!me || !voiceChannel.permissionsFor(me).has(PermissionFlagsBits.Speak)) {
+    await sendReply(interaction, "I don't have permission to speak in your voice channel.");
+    return null;
+  }
+
+  return voiceChannel;
+}
+
+async function joinAndPlay(interaction: Interaction, name: string): Promise<void> {
   const names = getSoundNames();
 
   if (names === null) {
@@ -205,12 +252,14 @@ async function joinAndPlay(interaction: Interaction, name: string): Promise<void
     return;
   }
 
-  const filePath = path.join(SOUNDS_DIR, `${fileName}.mp3`);
+  const voiceChannel = await resolveVoiceChannel(interaction);
 
-  connectTo(voiceChannel);
+  if (!voiceChannel) return;
+
+  const player = connectTo(voiceChannel);
 
   try {
-    const resource = createAudioResource(filePath);
+    const resource = createAudioResource(path.join(SOUNDS_DIR, `${fileName}.mp3`));
     player.play(resource);
   } catch (error) {
     console.error(`Failed to play sound "${fileName}":`, error);
@@ -227,12 +276,12 @@ async function stopPlayback(interaction: Interaction): Promise<void> {
     return;
   }
 
-  if (!connection) {
+  if (!getVoiceConnection(interaction.guildId)) {
     await sendReply(interaction, "I'm not in a voice channel.");
     return;
   }
 
-  player.stop(true);
+  players.get(interaction.guildId)?.stop(true);
 
   await sendReply(interaction, "Stopped playback.");
 }
@@ -254,7 +303,9 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
     }
 
     if (interaction.customId === "sb:leave") {
-      await leaveVoice(interaction);
+      if (!interaction.inGuild()) return;
+
+      await leaveVoice(interaction.guildId, interaction);
 
       return;
     }
@@ -263,12 +314,9 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
   if (!interaction.isChatInputCommand()) return;
 
   if (interaction.commandName === "join") {
-    const voiceChannel = getMemberVoiceChannel(interaction);
+    const voiceChannel = await resolveVoiceChannel(interaction);
 
-    if (!voiceChannel) {
-      await sendReply(interaction, "You must be in a voice channel!");
-      return;
-    }
+    if (!voiceChannel) return;
 
     connectTo(voiceChannel);
 
@@ -276,7 +324,12 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
   }
 
   if (interaction.commandName === "leave") {
-    await leaveVoice(interaction);
+    if (!interaction.inGuild()) {
+      await sendReply(interaction, "This command can only be used in a server.");
+      return;
+    }
+
+    await leaveVoice(interaction.guildId, interaction);
   }
 
   if (interaction.commandName === "play") {
@@ -394,24 +447,23 @@ client.on("interactionCreate", async (interaction: Interaction) => {
   }
 });
 
+// Leave when the bot's channel has no humans left (including if the bot was moved to an empty channel).
 client.on("voiceStateUpdate", async (oldState, newState) => {
   try {
-    const member = newState.member ?? oldState.member;
+    const guild = newState.guild;
 
-    if (!member || member.user.bot) return;
+    if (!getVoiceConnection(guild.id)) return;
 
-    const channel = oldState.channel ?? newState.channel;
+    const botChannel = guild.members.me?.voice.channel;
 
-    if (!channel) return;
+    if (!botChannel) return;
 
-    if (!connection) return;
+    if (oldState.channelId !== botChannel.id && newState.channelId !== botChannel.id) return;
 
-    if (channel.id !== connection.joinConfig.channelId) return;
-
-    const nonBotMembers = channel.members.filter(m => !m.user.bot);
+    const nonBotMembers = botChannel.members.filter(m => !m.user.bot);
 
     if (nonBotMembers.size === 0) {
-      await leaveVoice();
+      await leaveVoice(guild.id);
     }
   } catch (error) {
     console.error("Error handling voice state update:", error);
@@ -439,7 +491,35 @@ const commands = [
 
 const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
 
+// Leave voice channels cleanly on Ctrl+C / service stop.
+let shuttingDown = false;
+
+function shutdown(signal: NodeJS.Signals): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
+  console.log(`Received ${signal}, shutting down...`);
+
+  for (const conn of getVoiceConnections().values()) {
+    try {
+      destroyConnection(conn);
+    } catch (error) {
+      console.error("Failed to destroy voice connection during shutdown:", error);
+    }
+  }
+
+  client.destroy()
+    .catch(error => console.error("Failed to destroy client during shutdown:", error))
+    .finally(() => process.exit(0));
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+
 client.login(DISCORD_TOKEN).catch(error => {
   console.error("Failed to log in to Discord:", error);
-  process.exit(1);
+
+  // A bad token or disallowed intents won't be fixed by restarting.
+  const fatal = ["TokenInvalid", "DisallowedIntents"].includes(error?.code);
+  process.exit(fatal ? EXIT_CONFIG_ERROR : 1);
 });
