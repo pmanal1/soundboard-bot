@@ -7,7 +7,8 @@
     "build": "npx tsc",
     "exec": "node supervisor.js",
     "exec:once": "node dist/soundboard-bot.js",
-    "test": "npm run build && node --test test/"
+    "test": "npm run build && node --test test/",
+    "demo:voice-permissions": "npm run build && node scripts/voice-permissions-demo.js"
   },
   "keywords": [],
   "author": "",
