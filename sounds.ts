@@ -25,12 +25,24 @@ export function isValidSoundName(name: string): boolean {
   return true;
 }
 
+/**
+ * Removes one trailing ".mp3" (any case) and nothing else: "a.mp3.remix.mp3" becomes "a.mp3.remix".
+ */
+export function stripSoundExtension(fileName: string): string {
+  return fileName.toLowerCase().endsWith(SOUND_EXTENSION)
+    ? fileName.slice(0, -SOUND_EXTENSION.length)
+    : fileName;
+}
+
 function isInside(parent: string, child: string): boolean {
   const relative = path.relative(parent, child);
   return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
-/** Lists playable sound names, or null if the folder is missing or unreadable. */
+/**
+ * Lists playable sound names (sorted, without the extension, no duplicates), or null if the
+ * folder is missing or unreadable.
+ */
 export function listSoundNames(soundsDir: string): string[] | null {
   let entries: fs.Dirent[];
 
@@ -44,19 +56,28 @@ export function listSoundNames(soundsDir: string): string[] | null {
     return null;
   }
 
-  return entries
+  const names = entries
     .filter(entry => (entry.isFile() || entry.isSymbolicLink()) && entry.name.toLowerCase().endsWith(SOUND_EXTENSION))
-    .map(entry => entry.name.slice(0, -SOUND_EXTENSION.length))
+    .map(entry => stripSoundExtension(entry.name))
     .filter(isValidSoundName);
+
+  // "a.mp3" and "a.MP3" are both "a"; listing it twice would also break the soundboard,
+  // because custom IDs must be unique within a message.
+  return [...new Set(names)].sort((a, b) => a.localeCompare(b));
 }
 
 /**
- * Resolves a user-supplied sound name to a readable file inside soundsDir.
+ * Resolves a user-supplied sound name to a readable file inside soundsDir. A trailing ".mp3"
+ * typed by the user is accepted ("airhorn.mp3" plays "airhorn"), but an exact name wins, so a
+ * file named "x.mp3.mp3" is still reachable as "x.mp3".
  * The real path (symlinks followed) must stay inside the real sounds folder,
  * so neither "../" tricks nor symlinks can reach other files.
  */
 export async function resolveSound(soundsDir: string, name: string): Promise<SoundLookup> {
   if (!isValidSoundName(name)) return { ok: false, reason: "invalid-name" };
+
+  const stripped = stripSoundExtension(name);
+  const candidates = stripped !== name && isValidSoundName(stripped) ? [name, stripped] : [name];
 
   let realDir: string;
 
@@ -76,12 +97,24 @@ export async function resolveSound(soundsDir: string, name: string): Promise<Sou
 
   // Only names that are actually listed in the folder can be played (extension matched case-insensitively,
   // so "Clip.MP3" works the same way it is shown in /list).
-  const fileName = entries.find(entry =>
-    entry.length === name.length + SOUND_EXTENSION.length
-    && entry.startsWith(name)
-    && entry.slice(name.length).toLowerCase() === SOUND_EXTENSION);
+  const findFile = (soundName: string) => entries.find(entry =>
+    entry.length === soundName.length + SOUND_EXTENSION.length
+    && entry.startsWith(soundName)
+    && entry.slice(soundName.length).toLowerCase() === SOUND_EXTENSION);
 
-  if (fileName === undefined) return { ok: false, reason: "not-found" };
+  let soundName: string | undefined;
+  let fileName: string | undefined;
+
+  for (const candidate of candidates) {
+    fileName = findFile(candidate);
+
+    if (fileName !== undefined) {
+      soundName = candidate;
+      break;
+    }
+  }
+
+  if (soundName === undefined || fileName === undefined) return { ok: false, reason: "not-found" };
 
   const candidate = path.join(realDir, fileName);
 
@@ -108,7 +141,7 @@ export async function resolveSound(soundsDir: string, name: string): Promise<Sou
     return { ok: false, reason: "unreadable" };
   }
 
-  return { ok: true, name, filePath: realFile };
+  return { ok: true, name: soundName, filePath: realFile };
 }
 
 export function describeLookupFailure(reason: Exclude<SoundLookup, { ok: true }>["reason"]): string {

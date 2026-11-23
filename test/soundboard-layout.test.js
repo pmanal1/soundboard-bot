@@ -115,14 +115,18 @@ test("out-of-range pages are clamped", () => {
   assert.equal(clampPage(Infinity, 3), 0);
 });
 
-test("long names stay under the custom_id limit and duplicates are dropped", () => {
+test("long names get a button with a short custom_id and duplicates are dropped", () => {
   const longest = "x".repeat(MAX_CUSTOM_ID_LENGTH - "sb:play:".length);
   const tooLong = "y".repeat(MAX_CUSTOM_ID_LENGTH);
   const layout = buildSoundboardLayout([longest, tooLong, "a", "a", "b"], 0);
 
-  assert.deepEqual(soundNamesOn(layout), [longest, "a", "b"]);
-  assert.equal(layout.totalSounds, 3);
+  assert.deepEqual(soundNamesOn(layout), [longest, tooLong, "a", "b"]);
+  assert.equal(layout.totalSounds, 4);
   assertWithinDiscordLimits(layout, "long names");
+
+  const [longestButton, tooLongButton] = layout.rows[0];
+  assert.equal(longestButton.customId, `sb:play:${longest}`);
+  assert.match(tooLongButton.customId, /^sb:playk:/);
 
   const longNames = Array.from({ length: 60 }, (_, i) => `${String(i).padStart(2, "0")}${"z".repeat(90)}`);
   for (let page = 0; page < 3; page++) {

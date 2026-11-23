@@ -1,12 +1,12 @@
 // Pure soundboard layout: sound names + page -> rows of button specs.
 // No discord.js here, so it can be unit tested and printed by the demo script.
+import { MAX_CUSTOM_ID_LENGTH, PLAY_PREFIX, playCustomId } from "./sound-text.js";
+
+export { MAX_CUSTOM_ID_LENGTH, PLAY_PREFIX };
 
 // Discord limits for a single message.
 export const MAX_ACTION_ROWS = 5;
 export const MAX_BUTTONS_PER_ROW = 5;
-export const MAX_CUSTOM_ID_LENGTH = 100;
-
-export const PLAY_PREFIX = "sb:play:";
 export const STOP_ID = "sb:stop";
 export const LEAVE_ID = "sb:leave";
 const NAV_PREFIX = "sb:nav:";
@@ -27,23 +27,21 @@ export interface SoundboardLayout {
   page: number;
   /** Always at least 1, even with no sounds. */
   pageCount: number;
-  /** Number of sounds that fit a button (see soundboardNames). */
+  /** Number of distinct sounds (see soundboardNames). */
   totalSounds: number;
   /** Sound rows first, then the control row. Never more than MAX_ACTION_ROWS. */
   rows: ButtonSpec[][];
 }
 
 /**
- * Names that can be shown as buttons, in order: drops names whose custom ID would exceed
- * Discord's 100-character limit and duplicates (e.g. "a.mp3" and "a.MP3"), since custom IDs
- * must be unique within a message.
+ * Names to show as buttons, in order, without duplicates (custom IDs must be unique within a
+ * message). Names too long for a custom ID still get a button: playCustomId uses a short key.
  */
 export function soundboardNames(names: readonly string[]): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
 
   for (const name of names) {
-    if (PLAY_PREFIX.length + name.length > MAX_CUSTOM_ID_LENGTH) continue;
     if (seen.has(name)) continue;
 
     seen.add(name);
@@ -87,7 +85,7 @@ export function buildSoundboardLayout(names: readonly string[], requestedPage: n
   for (let i = 0; i < pageNames.length; i += MAX_BUTTONS_PER_ROW) {
     rows.push(pageNames.slice(i, i + MAX_BUTTONS_PER_ROW).map(name => ({
       kind: "sound" as const,
-      customId: `${PLAY_PREFIX}${name}`,
+      customId: playCustomId(name),
       name
     })));
   }

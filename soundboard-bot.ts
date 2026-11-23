@@ -16,19 +16,20 @@ import dotenv from "dotenv";
 import path from "path";
 import fs from "fs";
 import { describeLookupFailure, listSoundNames, resolveSound } from "./sounds.js";
+import { acknowledge, sendReply, sendStatus } from "./replies.js";
+import { chunkList, findSoundByKey, formatLabel, MAX_MESSAGE_LENGTH, parsePlayCustomId } from "./sound-text.js";
 import { connectTo, describeConnectFailure, destroyConnection, leaveGuild, stopGuildPlayback } from "./voice.js";
 import { buildVoiceControlContext, checkVoiceControl, describeVoiceControlRefusal } from "./voice-permissions.js";
 import type { VoiceAction } from "./voice-permissions.js";
-import { buildSoundboardLayout, LEAVE_ID, parseNavCustomId, PLAY_PREFIX, STOP_ID } from "./soundboard-layout.js";
+import { buildSoundboardLayout, LEAVE_ID, parseNavCustomId, STOP_ID } from "./soundboard-layout.js";
 import type { ButtonSpec } from "./soundboard-layout.js";
 
 dotenv.config();
 
-// Discord limits
-const MAX_MESSAGE_LENGTH = 2000;
-const MAX_BUTTON_LABEL_LENGTH = 80;
-
 const SOUNDS_DIR = path.resolve(process.cwd(), "sounds");
+
+// /list sends at most this many messages; anything beyond ends with "…and N more".
+const MAX_LIST_MESSAGES = 3;
 
 // Exit code for errors a restart can't fix (bad config / token). The supervisor won't restart on it.
 const EXIT_CONFIG_ERROR = 78;
@@ -52,41 +53,6 @@ process.on("uncaughtException", error => {
   process.exit(1);
 });
 
-async function sendReply(interaction: Interaction, message: string): Promise<void> {
-  if (!interaction.isRepliable()) return;
-
-  const content = message.length > MAX_MESSAGE_LENGTH
-    ? `${message.slice(0, MAX_MESSAGE_LENGTH - 1)}…`
-    : message;
-
-  try {
-    if (interaction.deferred && !interaction.replied) {
-      // Fill in the "thinking..." placeholder from deferEphemeral.
-      await interaction.editReply({ content });
-      setTimeout(() => interaction.deleteReply().catch(() => {}), 3000);
-    } else if (interaction.replied || interaction.deferred) {
-      const msg = await interaction.followUp({ content, flags: MessageFlags.Ephemeral });
-      setTimeout(() => msg.delete().catch(() => {}), 3000);
-    } else {
-      const msg = await interaction.reply({ content, flags: MessageFlags.Ephemeral });
-      setTimeout(() => msg.delete().catch(() => {}), 3000);
-    }
-  } catch (error) {
-    // Typically the interaction expired (not answered within 3s) or was already acknowledged.
-    console.error("Failed to reply to interaction:", error);
-  }
-}
-
-async function deferEphemeral(interaction: Interaction): Promise<void> {
-  if (!interaction.isRepliable() || interaction.replied || interaction.deferred) return;
-
-  try {
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-  } catch (error) {
-    console.error("Failed to defer interaction:", error);
-  }
-}
-
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates]
 });
@@ -107,7 +73,7 @@ async function leaveVoice(guildId: string, interaction?: Interaction): Promise<v
   leaveGuild(guildId);
 
   if (interaction) {
-    await sendReply(interaction, "Left voice channel.");
+    await sendStatus(interaction, "Left voice channel.");
   }
 }
 
@@ -204,7 +170,7 @@ async function joinAndPlay(interaction: Interaction, name: string): Promise<void
   if (!await ensureCanControlVoice(interaction, "summon")) return;
 
   // Connecting can take a few seconds; acknowledge first so the interaction doesn't expire.
-  await deferEphemeral(interaction);
+  await acknowledge(interaction);
 
   const connection = await connectTo(voiceChannel);
 
@@ -225,7 +191,7 @@ async function joinAndPlay(interaction: Interaction, name: string): Promise<void
     return;
   }
 
-  await sendReply(interaction, `Playing ${sound.name} 🔊`);
+  await sendStatus(interaction, `Playing ${sound.name} 🔊`);
 }
 
 async function stopPlayback(interaction: Interaction): Promise<void> {
@@ -244,20 +210,15 @@ async function stopPlayback(interaction: Interaction): Promise<void> {
   // Stops this guild's player only.
   stopGuildPlayback(interaction.guildId);
 
-  await sendReply(interaction, "Stopped playback.");
+  await sendStatus(interaction, "Stopped playback.");
 }
 
 function toButton(spec: ButtonSpec): ButtonBuilder {
   const button = new ButtonBuilder().setCustomId(spec.customId);
 
   switch (spec.kind) {
-    case "sound": {
-      const label = spec.name.length > MAX_BUTTON_LABEL_LENGTH
-        ? `${spec.name.slice(0, MAX_BUTTON_LABEL_LENGTH - 1)}…`
-        : spec.name;
-
-      return button.setLabel(label).setStyle(ButtonStyle.Secondary);
-    }
+    case "sound":
+      return button.setLabel(formatLabel(spec.name)).setStyle(ButtonStyle.Secondary);
     case "nav":
     case "indicator":
       return button.setLabel(spec.label).setStyle(ButtonStyle.Primary).setDisabled(spec.disabled);
@@ -301,8 +262,19 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
       return;
     }
 
-    if (interaction.customId.startsWith(PLAY_PREFIX)) {
-      const name = interaction.customId.slice(PLAY_PREFIX.length);
+    const playTarget = parsePlayCustomId(interaction.customId);
+
+    if (playTarget) {
+      // Long names are sent as a hash; map it back to a name in the folder as it is now.
+      // joinAndPlay still validates and resolves that name like any other.
+      const name = playTarget.kind === "name"
+        ? playTarget.name
+        : findSoundByKey(getSoundNames() ?? [], playTarget.key);
+
+      if (name === null) {
+        await sendReply(interaction, "That sound is no longer available. Use /list to see available sounds.");
+        return;
+      }
 
       await joinAndPlay(interaction, name);
 
@@ -333,11 +305,15 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
 
     if (!await ensureCanControlVoice(interaction, "summon")) return;
 
-    await deferEphemeral(interaction);
+    await acknowledge(interaction);
 
     const connection = await connectTo(voiceChannel);
 
-    await sendReply(interaction, connection.ok ? "Joined voice channel 🔊" : describeConnectFailure(connection.reason));
+    if (connection.ok) {
+      await sendStatus(interaction, "Joined voice channel 🔊");
+    } else {
+      await sendReply(interaction, describeConnectFailure(connection.reason));
+    }
   }
 
   if (interaction.commandName === "leave") {
@@ -371,8 +347,17 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
       return;
     }
 
-    // sendReply truncates to Discord's 2000 character limit if the list gets long.
-    await sendReply(interaction, `Available sounds:\n\n${names.map(n => `• ${n}`).join("\n")}`);
+    const chunks = chunkList(names.map(name => `• ${name}`), {
+      maxLength: MAX_MESSAGE_LENGTH,
+      maxChunks: MAX_LIST_MESSAGES,
+      header: `Available sounds (${names.length}):\n`,
+      moreNote: count => `…and ${count} more. Use /play with the exact name to play one.`
+    });
+
+    // The first chunk is the reply, the rest are follow-ups. Kept until the user dismisses them.
+    for (const chunk of chunks) {
+      await sendReply(interaction, chunk, null);
+    }
   }
 
   if (interaction.commandName === "soundboard") {
