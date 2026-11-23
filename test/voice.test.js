@@ -1,39 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import { VoiceConnectionDisconnectReason, VoiceConnectionStatus } from "@discordjs/voice";
 import { destroyConnection, trackConnection, waitUntilReady } from "../dist/voice.js";
-
-/** Mimics VoiceConnection's state machine: emits "stateChange" and the status-named event. */
-class FakeConnection extends EventEmitter {
-  state = { status: VoiceConnectionStatus.Signalling };
-  rejoinAttempts = 0;
-  destroyCalls = 0;
-  rejoinCalls = 0;
-
-  setState(state) {
-    const old = this.state;
-    this.state = state;
-    this.emit("stateChange", old, state);
-    this.emit(state.status, old, state);
-  }
-
-  destroy() {
-    this.destroyCalls++;
-    // Same behaviour as @discordjs/voice.
-    if (this.state.status === VoiceConnectionStatus.Destroyed) {
-      throw new Error("Cannot destroy VoiceConnection - it has already been destroyed");
-    }
-    this.setState({ status: VoiceConnectionStatus.Destroyed });
-  }
-
-  rejoin() {
-    this.rejoinAttempts++;
-    this.rejoinCalls++;
-    this.setState({ status: VoiceConnectionStatus.Signalling });
-    return true;
-  }
-}
+import { FakeConnection } from "./helpers/fake-voice.js";
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 

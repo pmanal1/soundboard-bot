@@ -16,7 +16,7 @@ import dotenv from "dotenv";
 import path from "path";
 import fs from "fs";
 import { describeLookupFailure, listSoundNames, resolveSound } from "./sounds.js";
-import { connectTo, describeConnectFailure, destroyConnection, getPlayer } from "./voice.js";
+import { connectTo, describeConnectFailure, destroyConnection, leaveGuild, stopGuildPlayback } from "./voice.js";
 import { buildVoiceControlContext, checkVoiceControl, describeVoiceControlRefusal } from "./voice-permissions.js";
 import type { VoiceAction } from "./voice-permissions.js";
 
@@ -97,9 +97,7 @@ const client = new Client({
 });
 
 async function leaveVoice(guildId: string, interaction?: Interaction): Promise<void> {
-  const conn = getVoiceConnection(guildId);
-
-  if (!conn) {
+  if (!getVoiceConnection(guildId)) {
     if (interaction) {
       await sendReply(interaction, "Not in a voice channel.");
     }
@@ -110,8 +108,8 @@ async function leaveVoice(guildId: string, interaction?: Interaction): Promise<v
   // Automatic leaves (empty channel) pass no interaction and skip the check.
   if (interaction && !await ensureCanControlVoice(interaction, "leave")) return;
 
-  // The Destroyed listener stops this guild's player.
-  destroyConnection(conn);
+  // Only this guild's connection and player are torn down; other servers keep playing.
+  leaveGuild(guildId);
 
   if (interaction) {
     await sendReply(interaction, "Left voice channel.");
@@ -248,7 +246,8 @@ async function stopPlayback(interaction: Interaction): Promise<void> {
 
   if (!await ensureCanControlVoice(interaction, "stop")) return;
 
-  getPlayer(interaction.guildId)?.stop(true);
+  // Stops this guild's player only.
+  stopGuildPlayback(interaction.guildId);
 
   await sendReply(interaction, "Stopped playback.");
 }
