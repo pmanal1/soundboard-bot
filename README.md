@@ -27,3 +27,5 @@ Currently set up in my homelab under an Ubuntu VM.
 `npm run exec:once` - starts the discord bot without auto-restart
 
 `npm test` - builds the project and runs the tests in test/
+
+`npm run demo:guilds` - builds the project and simulates two servers using the bot at once (no Discord token needed) to show that each server has its own voice connection and player

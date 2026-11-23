@@ -16,7 +16,7 @@ import dotenv from "dotenv";
 import path from "path";
 import fs from "fs";
 import { describeLookupFailure, listSoundNames, resolveSound } from "./sounds.js";
-import { connectTo, describeConnectFailure, destroyConnection, getPlayer } from "./voice.js";
+import { connectTo, describeConnectFailure, destroyConnection, leaveGuild, stopGuildPlayback } from "./voice.js";
 
 dotenv.config();
 
@@ -95,21 +95,11 @@ const client = new Client({
 });
 
 async function leaveVoice(guildId: string, interaction?: Interaction): Promise<void> {
-  const conn = getVoiceConnection(guildId);
-
-  if (!conn) {
-    if (interaction) {
-      await sendReply(interaction, "Not in a voice channel.");
-    }
-
-    return;
-  }
-
-  // The Destroyed listener stops this guild's player.
-  destroyConnection(conn);
+  // Only this guild's connection and player are torn down; other servers keep playing.
+  const left = leaveGuild(guildId);
 
   if (interaction) {
-    await sendReply(interaction, "Left voice channel.");
+    await sendReply(interaction, left ? "Left voice channel." : "Not in a voice channel.");
   }
 }
 
@@ -193,12 +183,11 @@ async function stopPlayback(interaction: Interaction): Promise<void> {
     return;
   }
 
-  if (!getVoiceConnection(interaction.guildId)) {
+  // Stops this guild's player only.
+  if (!stopGuildPlayback(interaction.guildId)) {
     await sendReply(interaction, "I'm not in a voice channel.");
     return;
   }
-
-  getPlayer(interaction.guildId)?.stop(true);
 
   await sendReply(interaction, "Stopped playback.");
 }
