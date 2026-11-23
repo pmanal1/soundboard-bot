@@ -16,6 +16,12 @@ Currently set up in my homelab under an Ubuntu VM.
 * If the discord bot is not in a channel when the sound command is issued, join the user's channel and play the sound.
 * When the bot leaves, pause the music.
 
+### Voice channel permissions
+
+While the bot is in a voice channel with other people, only members in that same channel can stop it, make it leave, or summon it elsewhere (`/stop`, `/leave`, `/join`, `/play` and the soundboard buttons). Anyone can summon it when it's idle or alone in its channel.
+
+Members with **Move Members** in the bot's channel (this includes Administrators) bypass the check, since Discord already lets them drag or disconnect the bot by hand. Manage Server is not a bypass. Bypasses are logged.
+
 ### project commands
 
 `npm ci` - installs the exact dependency versions from package-lock.json (use this instead of `npm install` when setting up)
@@ -27,3 +33,5 @@ Currently set up in my homelab under an Ubuntu VM.
 `npm run exec:once` - starts the discord bot without auto-restart
 
 `npm test` - builds the project and runs the tests in test/
+
+`npm run demo:voice-permissions` - prints who can stop/move/disconnect the bot in a few simulated situations (no Discord token needed)
