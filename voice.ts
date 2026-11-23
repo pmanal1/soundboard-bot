@@ -1,6 +1,7 @@
 import {
   createAudioPlayer,
   entersState,
+  getVoiceConnection,
   joinVoiceChannel,
   AudioPlayer,
   AudioPlayerStatus,
@@ -8,7 +9,7 @@ import {
   VoiceConnectionDisconnectReason,
   VoiceConnectionStatus
 } from "@discordjs/voice";
-import type { VoiceConnectionState } from "@discordjs/voice";
+import type { AudioPlayerState, PlayerSubscription, VoiceConnectionState } from "@discordjs/voice";
 import type { VoiceBasedChannel } from "discord.js";
 
 export const READY_TIMEOUT_MS = 20_000;
@@ -26,7 +27,33 @@ const CLOSE_CODE_MOVED_OR_KICKED = 4014;
  */
 export type ManagedConnection = Pick<VoiceConnection, "state" | "rejoinAttempts" | "rejoin" | "destroy" | "on" | "off">;
 
-const players = new Map<string, AudioPlayer>();
+/** Everything the bot holds for one guild's voice session. Each guild gets its own, so guilds never share a player. */
+interface GuildVoiceState {
+  connection: VoiceConnection;
+  player: AudioPlayer;
+  subscription: PlayerSubscription | undefined;
+  removePlayerListeners: () => void;
+}
+
+/** The @discordjs/voice functions this module calls; swappable so tests and the demo can run without Discord. */
+export interface VoiceBackend {
+  joinVoiceChannel: typeof joinVoiceChannel;
+  createAudioPlayer: typeof createAudioPlayer;
+  getVoiceConnection: typeof getVoiceConnection;
+}
+
+const defaultBackend: VoiceBackend = { joinVoiceChannel, createAudioPlayer, getVoiceConnection };
+let backend: VoiceBackend = defaultBackend;
+
+/** Replaces the @discordjs/voice backend (tests/demo only). Returns a function that restores the real one. */
+export function setVoiceBackend(overrides: Partial<VoiceBackend>): () => void {
+  backend = { ...defaultBackend, ...overrides };
+  return () => {
+    backend = defaultBackend;
+  };
+}
+
+const guildStates = new Map<string, GuildVoiceState>();
 const trackedConnections = new WeakSet<object>();
 
 function wait(ms: number): Promise<void> {
@@ -34,40 +61,85 @@ function wait(ms: number): Promise<void> {
 }
 
 export function getPlayer(guildId: string): AudioPlayer | undefined {
-  return players.get(guildId);
+  return guildStates.get(guildId)?.player;
 }
 
-function getOrCreatePlayer(guildId: string): AudioPlayer {
-  let player = players.get(guildId);
-
-  if (!player) {
-    player = createAudioPlayer();
-
-    // Without an "error" listener, an AudioPlayer error (bad file, ffmpeg failure, ...) crashes the process.
-    player.on("error", error => {
-      console.error(`Audio player error in guild ${guildId}:`, error.message);
-    });
-
-    player.on("stateChange", (oldState, newState) => {
-      if (oldState.status !== newState.status && newState.status === AudioPlayerStatus.AutoPaused) {
-        // Playing with no ready connection: the player resumes once the connection is ready again.
-        console.warn(`Audio player in guild ${guildId} auto-paused (voice connection not ready).`);
-      }
-    });
-
-    players.set(guildId, player);
-  }
-
-  return player;
+/** Guild IDs that currently hold voice state (connected, with a player). */
+export function getActiveGuildIds(): string[] {
+  return [...guildStates.keys()];
 }
 
-function releasePlayer(guildId: string): void {
-  const player = players.get(guildId);
+/** Creates this guild's player on first use and keeps it subscribed to the guild's current connection. */
+function getOrCreateGuildState(guildId: string, connection: VoiceConnection): GuildVoiceState {
+  const existing = guildStates.get(guildId);
 
-  if (player) {
-    player.stop(true);
-    players.delete(guildId);
-  }
+  if (existing?.connection === connection) return existing;
+
+  // Leftover state from an older connection for this guild: drop it rather than reuse it.
+  if (existing) releaseGuildState(guildId, existing.connection);
+
+  const player = backend.createAudioPlayer();
+
+  // Without an "error" listener, an AudioPlayer error (bad file, ffmpeg failure, ...) crashes the process.
+  const onError = (error: Error) => {
+    console.error(`Audio player error in guild ${guildId}:`, error.message);
+  };
+  const onStateChange = (oldState: AudioPlayerState, newState: AudioPlayerState) => {
+    if (oldState.status !== newState.status && newState.status === AudioPlayerStatus.AutoPaused) {
+      // Playing with no ready connection: the player resumes once the connection is ready again.
+      console.warn(`Audio player in guild ${guildId} auto-paused (voice connection not ready).`);
+    }
+  };
+
+  player.on("error", onError);
+  player.on("stateChange", onStateChange);
+
+  const state: GuildVoiceState = {
+    connection,
+    player,
+    subscription: connection.subscribe(player),
+    removePlayerListeners: () => {
+      player.off("error", onError);
+      player.off("stateChange", onStateChange);
+    }
+  };
+
+  guildStates.set(guildId, state);
+  return state;
+}
+
+/**
+ * Stops and forgets a guild's player. Only acts if the state still belongs to `connection`,
+ * so a late cleanup for an old connection can't tear down a newer session in the same guild.
+ */
+function releaseGuildState(guildId: string, connection: ManagedConnection): void {
+  const state = guildStates.get(guildId);
+
+  if (!state || state.connection !== connection) return;
+
+  guildStates.delete(guildId);
+  state.subscription?.unsubscribe();
+  state.player.stop(true);
+  state.removePlayerListeners();
+}
+
+/** Stops whatever is playing in this guild only. Returns false if the bot isn't connected there. */
+export function stopGuildPlayback(guildId: string): boolean {
+  if (!backend.getVoiceConnection(guildId)) return false;
+
+  guildStates.get(guildId)?.player.stop(true);
+  return true;
+}
+
+/** Leaves voice in this guild only. Returns false if the bot isn't connected there. */
+export function leaveGuild(guildId: string): boolean {
+  const conn = backend.getVoiceConnection(guildId);
+
+  if (!conn) return false;
+
+  // The Destroyed listener (see connectTo) releases this guild's state.
+  destroyConnection(conn);
+  return true;
 }
 
 /**
@@ -190,22 +262,19 @@ export type ConnectResult =
  */
 export async function connectTo(voiceChannel: VoiceBasedChannel, timeoutMs = READY_TIMEOUT_MS): Promise<ConnectResult> {
   const guildId = voiceChannel.guild.id;
-  const conn = joinVoiceChannel({
+  const conn = backend.joinVoiceChannel({
     channelId: voiceChannel.id,
     guildId,
     adapterCreator: voiceChannel.guild.voiceAdapterCreator
   });
 
-  trackConnection(conn, guildId, { onDestroyed: () => releasePlayer(guildId) });
+  trackConnection(conn, guildId, { onDestroyed: () => releaseGuildState(guildId, conn) });
 
   const ready = await waitUntilReady(conn, guildId, timeoutMs);
 
   if (!ready.ok) return ready;
 
-  const player = getOrCreatePlayer(guildId);
-  conn.subscribe(player);
-
-  return { ok: true, player };
+  return { ok: true, player: getOrCreateGuildState(guildId, conn).player };
 }
 
 export async function waitUntilReady(
