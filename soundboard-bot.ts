@@ -16,16 +16,8 @@ import dotenv from "dotenv";
 import path from "path";
 import fs from "fs";
 import { describeLookupFailure, listSoundNames, resolveSound } from "./sounds.js";
-import {
-  chunkList,
-  deleteLater,
-  findSoundByKey,
-  formatLabel,
-  MAX_MESSAGE_LENGTH,
-  parsePlayCustomId,
-  playCustomId,
-  truncate
-} from "./sound-text.js";
+import { acknowledge, sendReply, sendStatus } from "./replies.js";
+import { chunkList, findSoundByKey, formatLabel, MAX_MESSAGE_LENGTH, parsePlayCustomId, playCustomId } from "./sound-text.js";
 import { connectTo, describeConnectFailure, destroyConnection, getPlayer } from "./voice.js";
 
 dotenv.config();
@@ -38,12 +30,6 @@ const MAX_BUTTONS_PER_ROW = 5;
 const MAX_SOUNDBOARD_SOUNDS = (MAX_ACTION_ROWS - 1) * MAX_BUTTONS_PER_ROW;
 
 const SOUNDS_DIR = path.resolve(process.cwd(), "sounds");
-
-// Replies are ephemeral (only the user who asked sees them). They are removed after a while so
-// repeated soundboard presses don't pile up, but late enough to be read. Errors stay longer.
-// Both must stay under 15 minutes, after which the interaction token can no longer delete them.
-const STATUS_REPLY_LIFETIME_MS = 30_000;
-const ERROR_REPLY_LIFETIME_MS = 2 * 60_000;
 
 // /list sends at most this many messages; anything beyond ends with "…and N more".
 const MAX_LIST_MESSAGES = 3;
@@ -70,51 +56,6 @@ process.on("uncaughtException", error => {
   process.exit(1);
 });
 
-/**
- * Sends an ephemeral reply. It is deleted after lifetimeMs (default: the error lifetime, since
- * most replies are errors); pass null to keep it until the user dismisses it.
- */
-async function sendReply(
-  interaction: Interaction,
-  message: string,
-  lifetimeMs: number | null = ERROR_REPLY_LIFETIME_MS
-): Promise<void> {
-  if (!interaction.isRepliable()) return;
-
-  const content = truncate(message, MAX_MESSAGE_LENGTH);
-
-  try {
-    let messageId: string | undefined;
-
-    if (interaction.deferred && !interaction.replied) {
-      // Fill in the "thinking..." placeholder from deferEphemeral.
-      await interaction.editReply({ content });
-    } else if (interaction.replied || interaction.deferred) {
-      messageId = (await interaction.followUp({ content, flags: MessageFlags.Ephemeral })).id;
-    } else {
-      await interaction.reply({ content, flags: MessageFlags.Ephemeral });
-    }
-
-    if (lifetimeMs !== null) {
-      // Ephemeral messages can only be deleted through the interaction webhook, not Message#delete.
-      deleteLater(() => interaction.deleteReply(messageId), lifetimeMs);
-    }
-  } catch (error) {
-    // Typically the interaction expired (not answered within 3s) or was already acknowledged.
-    console.error("Failed to reply to interaction:", error);
-  }
-}
-
-async function deferEphemeral(interaction: Interaction): Promise<void> {
-  if (!interaction.isRepliable() || interaction.replied || interaction.deferred) return;
-
-  try {
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-  } catch (error) {
-    console.error("Failed to defer interaction:", error);
-  }
-}
-
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates]
 });
@@ -134,7 +75,7 @@ async function leaveVoice(guildId: string, interaction?: Interaction): Promise<v
   destroyConnection(conn);
 
   if (interaction) {
-    await sendReply(interaction, "Left voice channel.", STATUS_REPLY_LIFETIME_MS);
+    await sendStatus(interaction, "Left voice channel.");
   }
 }
 
@@ -188,7 +129,7 @@ async function joinAndPlay(interaction: Interaction, name: string): Promise<void
   if (!voiceChannel) return;
 
   // Connecting can take a few seconds; acknowledge first so the interaction doesn't expire.
-  await deferEphemeral(interaction);
+  await acknowledge(interaction);
 
   const connection = await connectTo(voiceChannel);
 
@@ -209,7 +150,7 @@ async function joinAndPlay(interaction: Interaction, name: string): Promise<void
     return;
   }
 
-  await sendReply(interaction, `Playing ${sound.name} 🔊`, STATUS_REPLY_LIFETIME_MS);
+  await sendStatus(interaction, `Playing ${sound.name} 🔊`);
 }
 
 async function stopPlayback(interaction: Interaction): Promise<void> {
@@ -225,7 +166,7 @@ async function stopPlayback(interaction: Interaction): Promise<void> {
 
   getPlayer(interaction.guildId)?.stop(true);
 
-  await sendReply(interaction, "Stopped playback.", STATUS_REPLY_LIFETIME_MS);
+  await sendStatus(interaction, "Stopped playback.");
 }
 
 async function handleInteraction(interaction: Interaction): Promise<void> {
@@ -271,12 +212,12 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
 
     if (!voiceChannel) return;
 
-    await deferEphemeral(interaction);
+    await acknowledge(interaction);
 
     const connection = await connectTo(voiceChannel);
 
     if (connection.ok) {
-      await sendReply(interaction, "Joined voice channel 🔊", STATUS_REPLY_LIFETIME_MS);
+      await sendStatus(interaction, "Joined voice channel 🔊");
     } else {
       await sendReply(interaction, describeConnectFailure(connection.reason));
     }
