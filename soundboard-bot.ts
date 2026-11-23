@@ -17,19 +17,14 @@ import path from "path";
 import fs from "fs";
 import { describeLookupFailure, listSoundNames, resolveSound } from "./sounds.js";
 import { connectTo, describeConnectFailure, destroyConnection, getPlayer } from "./voice.js";
+import { buildSoundboardLayout, LEAVE_ID, parseNavCustomId, PLAY_PREFIX, STOP_ID } from "./soundboard-layout.js";
+import type { ButtonSpec } from "./soundboard-layout.js";
 
 dotenv.config();
 
 // Discord limits
 const MAX_MESSAGE_LENGTH = 2000;
-const MAX_ACTION_ROWS = 5;
-const MAX_BUTTONS_PER_ROW = 5;
 const MAX_BUTTON_LABEL_LENGTH = 80;
-const MAX_CUSTOM_ID_LENGTH = 100;
-
-const PLAY_PREFIX = "sb:play:";
-// One row is reserved for the Stop/Leave controls.
-const MAX_SOUNDBOARD_SOUNDS = (MAX_ACTION_ROWS - 1) * MAX_BUTTONS_PER_ROW;
 
 const SOUNDS_DIR = path.resolve(process.cwd(), "sounds");
 
@@ -203,8 +198,60 @@ async function stopPlayback(interaction: Interaction): Promise<void> {
   await sendReply(interaction, "Stopped playback.");
 }
 
+function toButton(spec: ButtonSpec): ButtonBuilder {
+  const button = new ButtonBuilder().setCustomId(spec.customId);
+
+  switch (spec.kind) {
+    case "sound": {
+      const label = spec.name.length > MAX_BUTTON_LABEL_LENGTH
+        ? `${spec.name.slice(0, MAX_BUTTON_LABEL_LENGTH - 1)}…`
+        : spec.name;
+
+      return button.setLabel(label).setStyle(ButtonStyle.Secondary);
+    }
+    case "nav":
+    case "indicator":
+      return button.setLabel(spec.label).setStyle(ButtonStyle.Primary).setDisabled(spec.disabled);
+    case "control":
+      return button.setLabel(spec.label).setStyle(ButtonStyle.Danger);
+  }
+}
+
+/** Builds the soundboard message for a page; out-of-range pages are clamped. */
+function soundboardMessage(names: string[], page: number) {
+  const layout = buildSoundboardLayout(names, page);
+
+  const content = layout.totalSounds === 0
+    ? "No sounds available."
+    : layout.pageCount > 1
+      ? `Choose a sound to play (page ${layout.page + 1} of ${layout.pageCount}, ${layout.totalSounds} sounds):`
+      : "Choose a sound to play:";
+
+  const components = layout.rows.map(row =>
+    new ActionRowBuilder<ButtonBuilder>().addComponents(row.map(toButton)));
+
+  return { content, components, isEmpty: layout.totalSounds === 0 };
+}
+
 async function handleInteraction(interaction: Interaction): Promise<void> {
   if (interaction.isButton()) {
+    const navPage = parseNavCustomId(interaction.customId);
+
+    if (navPage !== null) {
+      const names = getSoundNames();
+
+      if (names === null) {
+        await sendReply(interaction, "Sounds folder not found.");
+        return;
+      }
+
+      // Re-read the folder and edit the board in place; the page is clamped if sounds were removed.
+      const { content, components } = soundboardMessage(names, navPage);
+      await interaction.update({ content, components });
+
+      return;
+    }
+
     if (interaction.customId.startsWith(PLAY_PREFIX)) {
       const name = interaction.customId.slice(PLAY_PREFIX.length);
 
@@ -213,13 +260,13 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
       return;
     }
 
-    if (interaction.customId === "sb:stop") {
+    if (interaction.customId === STOP_ID) {
       await stopPlayback(interaction);
 
       return;
     }
 
-    if (interaction.customId === "sb:leave") {
+    if (interaction.customId === LEAVE_ID) {
       if (!interaction.inGuild()) return;
 
       await leaveVoice(interaction.guildId, interaction);
@@ -285,58 +332,16 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
       return;
     }
 
-    // Button custom IDs are capped at 100 characters; skip names that would exceed it.
-    const playableNames = names.filter(n => PLAY_PREFIX.length + n.length <= MAX_CUSTOM_ID_LENGTH);
+    const { content, components, isEmpty } = soundboardMessage(names, 0);
 
-    if (playableNames.length === 0) {
-      await sendReply(interaction, "No sounds available.");
+    if (isEmpty) {
+      await sendReply(interaction, content);
       return;
     }
 
-    const limitedNames = playableNames.slice(0, MAX_SOUNDBOARD_SOUNDS);
-    const rows: ActionRowBuilder<ButtonBuilder>[] = [];
-
-    for (let i = 0; i < limitedNames.length; i += MAX_BUTTONS_PER_ROW) {
-      const row = new ActionRowBuilder<ButtonBuilder>();
-      const slice = limitedNames.slice(i, i + MAX_BUTTONS_PER_ROW);
-
-      for (const name of slice) {
-        const label = name.length > MAX_BUTTON_LABEL_LENGTH
-          ? `${name.slice(0, MAX_BUTTON_LABEL_LENGTH - 1)}…`
-          : name;
-
-        row.addComponents(
-          new ButtonBuilder()
-            .setCustomId(`${PLAY_PREFIX}${name}`)
-            .setLabel(label)
-            .setStyle(ButtonStyle.Secondary)
-        );
-      }
-
-      rows.push(row);
-    }
-
-    const stopRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId("sb:stop")
-        .setLabel("Stop")
-        .setStyle(ButtonStyle.Danger),
-      new ButtonBuilder()
-        .setCustomId("sb:leave")
-        .setLabel("Leave")
-        .setStyle(ButtonStyle.Danger)
-    );
-
-    rows.push(stopRow);
-
-    const hidden = playableNames.length - limitedNames.length;
-    const content = hidden > 0
-      ? `Choose a sound to play (${hidden} more not shown, use /play):`
-      : "Choose a sound to play:";
-
     await interaction.reply({
       content,
-      components: rows,
+      components,
       flags: MessageFlags.Ephemeral
     });
   }

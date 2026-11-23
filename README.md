@@ -27,3 +27,5 @@ Currently set up in my homelab under an Ubuntu VM.
 `npm run exec:once` - starts the discord bot without auto-restart
 
 `npm test` - builds the project and runs the tests in test/
+
+`npm run demo` - prints the /soundboard button layout page by page (21 and 57 sounds by default; pass counts with `npm run demo -- 0 25 100`)
