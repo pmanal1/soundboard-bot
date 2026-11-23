@@ -34,6 +34,8 @@ Members with **Move Members** in the bot's channel (this includes Administrators
 
 `npm test` - builds the project and runs the tests in test/
 
+`npm run demo` - prints the /soundboard button layout page by page (21 and 57 sounds by default; pass counts with `npm run demo -- 0 25 100`)
+
 `npm run demo:guilds` - builds the project and simulates two servers using the bot at once (no Discord token needed) to show that each server has its own voice connection and player
 
 `npm run demo:voice-permissions` - prints who can stop/move/disconnect the bot in a few simulated situations (no Discord token needed)
