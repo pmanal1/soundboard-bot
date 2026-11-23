@@ -7,6 +7,7 @@ import { isValidSoundName, listSoundNames, resolveSound } from "../dist/sounds.j
 
 let root;
 let soundsDir;
+let extDir;
 
 before(() => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "soundboard-test-"));
@@ -20,6 +21,13 @@ before(() => {
   fs.writeFileSync(path.join(root, "secret.mp3"), "top secret");
   fs.symlinkSync(path.join(root, "secret.mp3"), path.join(soundsDir, "escape.mp3"));
   fs.symlinkSync(path.join(soundsDir, "airhorn.mp3"), path.join(soundsDir, "alias.mp3"));
+
+  // Names that are awkward to strip the extension from.
+  extDir = path.join(root, "ext");
+  fs.mkdirSync(extDir);
+  for (const file of ["a.mp3.remix.mp3", "x.mp3.mp3", "x.mp3", ".mp3", "dup.mp3", "dup.MP3", "v1.2.final.mp3"]) {
+    fs.writeFileSync(path.join(extDir, file), file);
+  }
 });
 
 after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -69,4 +77,24 @@ test("rejects unreadable files", { skip: process.getuid?.() === 0 && "root can r
   } finally {
     fs.rmSync(file);
   }
+});
+
+test("strips only the trailing extension, hides empty names and de-duplicates", () => {
+  assert.deepEqual(listSoundNames(extDir), ["a.mp3.remix", "dup", "v1.2.final", "x", "x.mp3"]);
+});
+
+test("accepts a typed .mp3 extension, but an exact name wins", async () => {
+  const play = async name => {
+    const result = await resolveSound(extDir, name);
+    return result.ok ? [result.name, fs.readFileSync(result.filePath, "utf8")] : result.reason;
+  };
+
+  assert.deepEqual(await play("a.mp3.remix"), ["a.mp3.remix", "a.mp3.remix.mp3"]);
+  assert.deepEqual(await play("a.mp3.remix.mp3"), ["a.mp3.remix", "a.mp3.remix.mp3"]);
+  assert.deepEqual(await play("x"), ["x", "x.mp3"]);
+  assert.deepEqual(await play("x.mp3"), ["x.mp3", "x.mp3.mp3"], "exact name beats stripping");
+  assert.deepEqual(await play("x.MP3"), ["x", "x.mp3"]);
+  assert.deepEqual(await play("a.mp3"), "not-found", "only the trailing extension is stripped");
+  assert.deepEqual(await play(".mp3"), "not-found", "file with an empty name stays hidden");
+  assert.deepEqual(await play("../secret.mp3"), "invalid-name");
 });

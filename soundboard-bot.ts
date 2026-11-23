@@ -16,22 +16,37 @@ import dotenv from "dotenv";
 import path from "path";
 import fs from "fs";
 import { describeLookupFailure, listSoundNames, resolveSound } from "./sounds.js";
+import {
+  chunkList,
+  deleteLater,
+  findSoundByKey,
+  formatLabel,
+  MAX_MESSAGE_LENGTH,
+  parsePlayCustomId,
+  playCustomId,
+  truncate
+} from "./sound-text.js";
 import { connectTo, describeConnectFailure, destroyConnection, getPlayer } from "./voice.js";
 
 dotenv.config();
 
 // Discord limits
-const MAX_MESSAGE_LENGTH = 2000;
 const MAX_ACTION_ROWS = 5;
 const MAX_BUTTONS_PER_ROW = 5;
-const MAX_BUTTON_LABEL_LENGTH = 80;
-const MAX_CUSTOM_ID_LENGTH = 100;
 
-const PLAY_PREFIX = "sb:play:";
 // One row is reserved for the Stop/Leave controls.
 const MAX_SOUNDBOARD_SOUNDS = (MAX_ACTION_ROWS - 1) * MAX_BUTTONS_PER_ROW;
 
 const SOUNDS_DIR = path.resolve(process.cwd(), "sounds");
+
+// Replies are ephemeral (only the user who asked sees them). They are removed after a while so
+// repeated soundboard presses don't pile up, but late enough to be read. Errors stay longer.
+// Both must stay under 15 minutes, after which the interaction token can no longer delete them.
+const STATUS_REPLY_LIFETIME_MS = 30_000;
+const ERROR_REPLY_LIFETIME_MS = 2 * 60_000;
+
+// /list sends at most this many messages; anything beyond ends with "…and N more".
+const MAX_LIST_MESSAGES = 3;
 
 // Exit code for errors a restart can't fix (bad config / token). The supervisor won't restart on it.
 const EXIT_CONFIG_ERROR = 78;
@@ -55,24 +70,34 @@ process.on("uncaughtException", error => {
   process.exit(1);
 });
 
-async function sendReply(interaction: Interaction, message: string): Promise<void> {
+/**
+ * Sends an ephemeral reply. It is deleted after lifetimeMs (default: the error lifetime, since
+ * most replies are errors); pass null to keep it until the user dismisses it.
+ */
+async function sendReply(
+  interaction: Interaction,
+  message: string,
+  lifetimeMs: number | null = ERROR_REPLY_LIFETIME_MS
+): Promise<void> {
   if (!interaction.isRepliable()) return;
 
-  const content = message.length > MAX_MESSAGE_LENGTH
-    ? `${message.slice(0, MAX_MESSAGE_LENGTH - 1)}…`
-    : message;
+  const content = truncate(message, MAX_MESSAGE_LENGTH);
 
   try {
+    let messageId: string | undefined;
+
     if (interaction.deferred && !interaction.replied) {
       // Fill in the "thinking..." placeholder from deferEphemeral.
       await interaction.editReply({ content });
-      setTimeout(() => interaction.deleteReply().catch(() => {}), 3000);
     } else if (interaction.replied || interaction.deferred) {
-      const msg = await interaction.followUp({ content, flags: MessageFlags.Ephemeral });
-      setTimeout(() => msg.delete().catch(() => {}), 3000);
+      messageId = (await interaction.followUp({ content, flags: MessageFlags.Ephemeral })).id;
     } else {
-      const msg = await interaction.reply({ content, flags: MessageFlags.Ephemeral });
-      setTimeout(() => msg.delete().catch(() => {}), 3000);
+      await interaction.reply({ content, flags: MessageFlags.Ephemeral });
+    }
+
+    if (lifetimeMs !== null) {
+      // Ephemeral messages can only be deleted through the interaction webhook, not Message#delete.
+      deleteLater(() => interaction.deleteReply(messageId), lifetimeMs);
     }
   } catch (error) {
     // Typically the interaction expired (not answered within 3s) or was already acknowledged.
@@ -109,7 +134,7 @@ async function leaveVoice(guildId: string, interaction?: Interaction): Promise<v
   destroyConnection(conn);
 
   if (interaction) {
-    await sendReply(interaction, "Left voice channel.");
+    await sendReply(interaction, "Left voice channel.", STATUS_REPLY_LIFETIME_MS);
   }
 }
 
@@ -184,7 +209,7 @@ async function joinAndPlay(interaction: Interaction, name: string): Promise<void
     return;
   }
 
-  await sendReply(interaction, `Playing ${sound.name} 🔊`);
+  await sendReply(interaction, `Playing ${sound.name} 🔊`, STATUS_REPLY_LIFETIME_MS);
 }
 
 async function stopPlayback(interaction: Interaction): Promise<void> {
@@ -200,13 +225,24 @@ async function stopPlayback(interaction: Interaction): Promise<void> {
 
   getPlayer(interaction.guildId)?.stop(true);
 
-  await sendReply(interaction, "Stopped playback.");
+  await sendReply(interaction, "Stopped playback.", STATUS_REPLY_LIFETIME_MS);
 }
 
 async function handleInteraction(interaction: Interaction): Promise<void> {
   if (interaction.isButton()) {
-    if (interaction.customId.startsWith(PLAY_PREFIX)) {
-      const name = interaction.customId.slice(PLAY_PREFIX.length);
+    const playTarget = parsePlayCustomId(interaction.customId);
+
+    if (playTarget) {
+      // Long names are sent as a hash; map it back to a name in the folder as it is now.
+      // joinAndPlay still validates and resolves that name like any other.
+      const name = playTarget.kind === "name"
+        ? playTarget.name
+        : findSoundByKey(getSoundNames() ?? [], playTarget.key);
+
+      if (name === null) {
+        await sendReply(interaction, "That sound is no longer available. Use /list to see available sounds.");
+        return;
+      }
 
       await joinAndPlay(interaction, name);
 
@@ -239,7 +275,11 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
 
     const connection = await connectTo(voiceChannel);
 
-    await sendReply(interaction, connection.ok ? "Joined voice channel 🔊" : describeConnectFailure(connection.reason));
+    if (connection.ok) {
+      await sendReply(interaction, "Joined voice channel 🔊", STATUS_REPLY_LIFETIME_MS);
+    } else {
+      await sendReply(interaction, describeConnectFailure(connection.reason));
+    }
   }
 
   if (interaction.commandName === "leave") {
@@ -273,8 +313,17 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
       return;
     }
 
-    // sendReply truncates to Discord's 2000 character limit if the list gets long.
-    await sendReply(interaction, `Available sounds:\n\n${names.map(n => `• ${n}`).join("\n")}`);
+    const chunks = chunkList(names.map(name => `• ${name}`), {
+      maxLength: MAX_MESSAGE_LENGTH,
+      maxChunks: MAX_LIST_MESSAGES,
+      header: `Available sounds (${names.length}):\n`,
+      moreNote: count => `…and ${count} more. Use /play with the exact name to play one.`
+    });
+
+    // The first chunk is the reply, the rest are follow-ups. Kept until the user dismisses them.
+    for (const chunk of chunks) {
+      await sendReply(interaction, chunk, null);
+    }
   }
 
   if (interaction.commandName === "soundboard") {
@@ -285,15 +334,12 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
       return;
     }
 
-    // Button custom IDs are capped at 100 characters; skip names that would exceed it.
-    const playableNames = names.filter(n => PLAY_PREFIX.length + n.length <= MAX_CUSTOM_ID_LENGTH);
-
-    if (playableNames.length === 0) {
+    if (names.length === 0) {
       await sendReply(interaction, "No sounds available.");
       return;
     }
 
-    const limitedNames = playableNames.slice(0, MAX_SOUNDBOARD_SOUNDS);
+    const limitedNames = names.slice(0, MAX_SOUNDBOARD_SOUNDS);
     const rows: ActionRowBuilder<ButtonBuilder>[] = [];
 
     for (let i = 0; i < limitedNames.length; i += MAX_BUTTONS_PER_ROW) {
@@ -301,14 +347,10 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
       const slice = limitedNames.slice(i, i + MAX_BUTTONS_PER_ROW);
 
       for (const name of slice) {
-        const label = name.length > MAX_BUTTON_LABEL_LENGTH
-          ? `${name.slice(0, MAX_BUTTON_LABEL_LENGTH - 1)}…`
-          : name;
-
         row.addComponents(
           new ButtonBuilder()
-            .setCustomId(`${PLAY_PREFIX}${name}`)
-            .setLabel(label)
+            .setCustomId(playCustomId(name))
+            .setLabel(formatLabel(name))
             .setStyle(ButtonStyle.Secondary)
         );
       }
@@ -329,7 +371,7 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
 
     rows.push(stopRow);
 
-    const hidden = playableNames.length - limitedNames.length;
+    const hidden = names.length - limitedNames.length;
     const content = hidden > 0
       ? `Choose a sound to play (${hidden} more not shown, use /play):`
       : "Choose a sound to play:";
