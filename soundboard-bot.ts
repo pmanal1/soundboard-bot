@@ -10,13 +10,15 @@ import {
   Routes,
   SlashCommandBuilder
 } from "discord.js";
-import type { Interaction, VoiceBasedChannel } from "discord.js";
+import type { Guild, Interaction, VoiceBasedChannel } from "discord.js";
 import { createAudioResource, getVoiceConnection, getVoiceConnections } from "@discordjs/voice";
 import dotenv from "dotenv";
 import path from "path";
 import fs from "fs";
 import { describeLookupFailure, listSoundNames, resolveSound } from "./sounds.js";
-import { connectTo, describeConnectFailure, destroyConnection, getPlayer } from "./voice.js";
+import { connectTo, describeConnectFailure, destroyConnection, leaveGuild, stopGuildPlayback } from "./voice.js";
+import { buildVoiceControlContext, checkVoiceControl, describeVoiceControlRefusal } from "./voice-permissions.js";
+import type { VoiceAction } from "./voice-permissions.js";
 import { buildSoundboardLayout, LEAVE_ID, parseNavCustomId, PLAY_PREFIX, STOP_ID } from "./soundboard-layout.js";
 import type { ButtonSpec } from "./soundboard-layout.js";
 
@@ -90,9 +92,7 @@ const client = new Client({
 });
 
 async function leaveVoice(guildId: string, interaction?: Interaction): Promise<void> {
-  const conn = getVoiceConnection(guildId);
-
-  if (!conn) {
+  if (!getVoiceConnection(guildId)) {
     if (interaction) {
       await sendReply(interaction, "Not in a voice channel.");
     }
@@ -100,12 +100,56 @@ async function leaveVoice(guildId: string, interaction?: Interaction): Promise<v
     return;
   }
 
-  // The Destroyed listener stops this guild's player.
-  destroyConnection(conn);
+  // Automatic leaves (empty channel) pass no interaction and skip the check.
+  if (interaction && !await ensureCanControlVoice(interaction, "leave")) return;
+
+  // Only this guild's connection and player are torn down; other servers keep playing.
+  leaveGuild(guildId);
 
   if (interaction) {
     await sendReply(interaction, "Left voice channel.");
   }
+}
+
+/** The channel the bot is connected to in this guild, or null if it isn't connected. */
+function getBotVoiceChannel(guild: Guild): VoiceBasedChannel | null {
+  const conn = getVoiceConnection(guild.id);
+
+  if (!conn) return null;
+
+  // The bot's own voice state is the source of truth; joinConfig covers the window while it's still connecting.
+  const channelId = guild.members.me?.voice.channelId ?? conn.joinConfig.channelId;
+  const channel = channelId ? guild.channels.cache.get(channelId) : undefined;
+
+  return channel?.isVoiceBased() ? channel : null;
+}
+
+/**
+ * Stops the caller from moving, stopping or disconnecting the bot while it's playing for other people
+ * in a channel the caller isn't in (see voice-permissions.ts). Replies with the reason and returns false if refused.
+ */
+async function ensureCanControlVoice(interaction: Interaction, action: VoiceAction): Promise<boolean> {
+  if (!interaction.inCachedGuild()) {
+    // Without the cached member we can't tell which channel they're in; fail closed.
+    await sendReply(interaction, "Couldn't check your voice channel. Please try again.");
+    return false;
+  }
+
+  const member = interaction.member;
+  const botChannel = getBotVoiceChannel(interaction.guild);
+  const canBypass = botChannel?.permissionsFor(member).has(PermissionFlagsBits.MoveMembers) ?? false;
+  const decision = checkVoiceControl(buildVoiceControlContext(member, botChannel, canBypass));
+
+  if (decision === "refused" && botChannel) {
+    await sendReply(interaction, describeVoiceControlRefusal(action, botChannel.id));
+    return false;
+  }
+
+  if (decision === "bypass") {
+    console.log(`${member.user.tag} used Move Members to ${action} the bot away from listeners in guild ${interaction.guildId}.`);
+  }
+
+  return true;
 }
 
 function getSoundNames(): string[] | null {
@@ -157,6 +201,8 @@ async function joinAndPlay(interaction: Interaction, name: string): Promise<void
 
   if (!voiceChannel) return;
 
+  if (!await ensureCanControlVoice(interaction, "summon")) return;
+
   // Connecting can take a few seconds; acknowledge first so the interaction doesn't expire.
   await deferEphemeral(interaction);
 
@@ -193,7 +239,10 @@ async function stopPlayback(interaction: Interaction): Promise<void> {
     return;
   }
 
-  getPlayer(interaction.guildId)?.stop(true);
+  if (!await ensureCanControlVoice(interaction, "stop")) return;
+
+  // Stops this guild's player only.
+  stopGuildPlayback(interaction.guildId);
 
   await sendReply(interaction, "Stopped playback.");
 }
@@ -281,6 +330,8 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
     const voiceChannel = await resolveVoiceChannel(interaction);
 
     if (!voiceChannel) return;
+
+    if (!await ensureCanControlVoice(interaction, "summon")) return;
 
     await deferEphemeral(interaction);
 

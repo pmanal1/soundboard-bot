@@ -8,7 +8,9 @@
     "exec": "node supervisor.js",
     "exec:once": "node dist/soundboard-bot.js",
     "test": "npm run build && node --test test/",
-    "demo": "npm run build && node scripts/soundboard-demo.js"
+    "demo": "npm run build && node scripts/soundboard-demo.js",
+    "demo:guilds": "npm run build && node scripts/demo-guild-isolation.js",
+    "demo:voice-permissions": "npm run build && node scripts/voice-permissions-demo.js"
   },
   "keywords": [],
   "author": "",
